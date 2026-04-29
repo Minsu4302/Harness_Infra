@@ -1,0 +1,21 @@
+name: observability
+version: "0.1.0"
+description: 하네스 관측성 레이어 — logs/ 수집 및 외부 시스템 연동 훅
+
+hooks:
+  - post-scan
+
+# post-scan 훅: gc-agent --scan 완료 후 실행
+# 외부 시스템(Victoria Logs 등) 연동 시 이 파일 옆에 post-scan.sh 추가
+# 예시: post-scan.sh → curl -X POST $VICTORIALOGS_URL -d @logs/events/today.jsonl
+
+config:
+  # 외부 로그 시스템 엔드포인트 (선택)
+  external_endpoint: ""
+  # 로그 보존 기간 (일)
+  retention_days: 30
+  # 수집 메트릭 목록
+  metrics:
+    - context_budget_pct
+    - task_duration_hours
+    - constraint_pass_rate

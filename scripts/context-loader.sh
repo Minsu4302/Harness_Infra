@@ -1,128 +1,171 @@
-#!/bin/bash
-
-##############################################################################
+#!/bin/sh
 # context-loader.sh — 세션 컨텍스트 로드
 #
-# 역할: 새 세션 시작 시 필요한 정보를 로드
-#   1. HARNESS.md 읽기
-#   2. debt-report.md 요약을 context/current.md에 저장
-#   3. 이전 task.md를 history에 백업
-#   4. 새로운 세션 초기화
-#
-##############################################################################
+# 사용법:
+#   context-loader.sh                     compile 모드 (기본)
+#   context-loader.sh --task-type feature compile 모드 + 태스크 유형 지정
+#   context-loader.sh --verify            컨텍스트 예산 검사만 실행
 
-set -euo pipefail
+set -eu
 
-HARNESS_ROOT="${HARNESS_ROOT:-.}"
+HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 HARNESS_PHASE="${HARNESS_PHASE:-development}"
+export HARNESS_ROOT HARNESS_PHASE
 
-# 디렉토리 생성
-mkdir -p "${HARNESS_ROOT}/.harness/context"
-mkdir -p "${HARNESS_ROOT}/.harness/reports"
-mkdir -p "${HARNESS_ROOT}/.harness/session"
+MAX_LINES=400
+WARN_LINES=320
 
 CURRENT_CONTEXT="${HARNESS_ROOT}/.harness/context/current.md"
 DEBT_REPORT="${HARNESS_ROOT}/.harness/reports/debt-report.md"
 TASK_FILE="${HARNESS_ROOT}/.harness/session/task.md"
 HISTORY_DIR="${HARNESS_ROOT}/.harness/reports/history"
 
-echo ">>> [context-loader] Loading harness context (phase: $HARNESS_PHASE)..." >&2
+# 옵션 파싱
+MODE="compile"
+TASK_TYPE="general"
+for _arg in "$@"; do
+  case "$_arg" in
+    --verify)          MODE="verify" ;;
+    --task-type)       _next_task_type=1 ;;
+    feature|bug|refactor|general)
+      [ "${_next_task_type:-0}" = "1" ] && TASK_TYPE="$_arg"; _next_task_type=0 ;;
+  esac
+done
 
-# ============================================================================
-# 1. 이전 task.md를 history에 백업
-# ============================================================================
-if [[ -f "$TASK_FILE" ]]; then
-  timestamp=$(date +%Y%m%d_%H%M%S)
-  mkdir -p "$HISTORY_DIR"
-  cp "$TASK_FILE" "${HISTORY_DIR}/task_${timestamp}.md"
-  echo ">>> [context-loader] Previous task backed up to history" >&2
+# ── verify 모드 ──────────────────────────────────────────────────────────────
+if [ "$MODE" = "verify" ]; then
+  if [ ! -f "$CURRENT_CONTEXT" ]; then
+    printf 'WARN: context/current.md 없음 — compile 모드를 먼저 실행하세요\n' >&2
+    exit 1
+  fi
+  _lines=$(wc -l < "$CURRENT_CONTEXT" | tr -d '[:space:]')
+  _pct=$(( _lines * 100 / MAX_LINES ))
+  printf '[context-loader] budget: %d/%d lines (%d%%)\n' "$_lines" "$MAX_LINES" "$_pct" >&2
+
+  if [ "$_lines" -gt "$MAX_LINES" ]; then
+    printf 'FAIL: 컨텍스트 예산 초과 (%d > %d)\n' "$_lines" "$MAX_LINES" >&2
+    exit 1
+  elif [ "$_lines" -gt "$WARN_LINES" ]; then
+    printf 'WARN: 컨텍스트 예산 경고 (%d > %d)\n' "$_lines" "$WARN_LINES" >&2
+    exit 0
+  fi
+  printf 'PASS: 컨텍스트 예산 정상\n' >&2
+  exit 0
 fi
 
-# ============================================================================
-# 2. debt-report.md 요약을 current.md에 저장
-# ============================================================================
-cat > "$CURRENT_CONTEXT" << 'EOF'
+# ── compile 모드 ─────────────────────────────────────────────────────────────
+mkdir -p "$(dirname "$CURRENT_CONTEXT")" "$HISTORY_DIR" \
+         "$(dirname "$TASK_FILE")" "$(dirname "$DEBT_REPORT")"
+
+printf '[context-loader] compile (phase=%s, task_type=%s)\n' "$HARNESS_PHASE" "$TASK_TYPE" >&2
+
+# 이전 task.md 백업
+if [ -f "$TASK_FILE" ]; then
+  _ts=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "backup")
+  cp "$TASK_FILE" "${HISTORY_DIR}/task_${_ts}.md"
+  printf '[context-loader] previous task backed up\n' >&2
+fi
+
+# current.md 생성
+_now=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
+
+cat > "$CURRENT_CONTEXT" <<HEADER
 ---
 title: Current Context
+loaded_at: ${_now}
+phase: ${HARNESS_PHASE}
+task_type: ${TASK_TYPE}
 watches:
   - .harness/reports/debt-report.md
-loaded_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-phase: development
 ---
 
-# Current Context
-
-## 기술 부채 요약
-
-EOF
-
-# debt-report.md가 있으면 요약 추가
-if [[ -f "$DEBT_REPORT" ]]; then
-  echo "### CRITICAL Issues" >> "$CURRENT_CONTEXT"
-  grep -A 20 "^## CRITICAL" "$DEBT_REPORT" | tail -n +2 >> "$CURRENT_CONTEXT" 2>/dev/null || echo "없음" >> "$CURRENT_CONTEXT"
-
-  echo "" >> "$CURRENT_CONTEXT"
-  echo "### WARNING Issues" >> "$CURRENT_CONTEXT"
-  grep -A 20 "^## WARNING" "$DEBT_REPORT" | tail -n +2 >> "$CURRENT_CONTEXT" 2>/dev/null || echo "없음" >> "$CURRENT_CONTEXT"
-else
-  echo "없음" >> "$CURRENT_CONTEXT"
-fi
-
-# ============================================================================
-# 3. 환경 정보 추가
-# ============================================================================
-cat >> "$CURRENT_CONTEXT" << EOF
-
-## 환경 정보
-
-- **Phase**: $HARNESS_PHASE
-- **Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-- **User**: \${USER:-unknown}
-- **PWD**: $HARNESS_ROOT
+# 현재 세션 컨텍스트
 
 ## 활성 제약 조건
 
-EOF
+HEADER
 
-# Phase에 따른 활성 제약 조건 출력
-case "$HARNESS_PHASE" in
-  planning)
-    echo "C02, C03, C06" >> "$CURRENT_CONTEXT"
+# _lib.sh 로드해서 get_active_constraints 사용
+. "${HARNESS_ROOT}/linters/_lib.sh"
+_constraints=$(get_active_constraints)
+echo "$_constraints" | tr ' ' '\n' | grep -v '^$' | \
+  while read -r _c; do echo "- $_c"; done >> "$CURRENT_CONTEXT"
+
+cat >> "$CURRENT_CONTEXT" <<SECTION
+
+## 기술 부채 요약
+
+SECTION
+
+if [ -f "$DEBT_REPORT" ]; then
+  # CRITICAL 섹션 발췌
+  _critical=$(awk '/^## CRITICAL/{f=1;next} /^## /{f=0} f' "$DEBT_REPORT" 2>/dev/null || true)
+  printf '### CRITICAL\n\n' >> "$CURRENT_CONTEXT"
+  if [ -n "$_critical" ]; then
+    echo "$_critical" >> "$CURRENT_CONTEXT"
+  else
+    printf '없음\n' >> "$CURRENT_CONTEXT"
+  fi
+
+  # WARN 섹션 발췌
+  _warn=$(awk '/^## WARN/{f=1;next} /^## /{f=0} f' "$DEBT_REPORT" 2>/dev/null || true)
+  printf '\n### WARN\n\n' >> "$CURRENT_CONTEXT"
+  if [ -n "$_warn" ]; then
+    echo "$_warn" >> "$CURRENT_CONTEXT"
+  else
+    printf '없음\n' >> "$CURRENT_CONTEXT"
+  fi
+else
+  printf '(debt-report.md 없음 — gc-agent --scan 실행 후 재로드)\n' >> "$CURRENT_CONTEXT"
+fi
+
+# 태스크 유형별 추가 컨텍스트 주입
+cat >> "$CURRENT_CONTEXT" <<SECTION
+
+## 태스크 가이드 (${TASK_TYPE})
+
+SECTION
+
+case "$TASK_TYPE" in
+  feature)
+    cat >> "$CURRENT_CONTEXT" <<GUIDE
+- EXEC_PLAN 작성 후 진행 (PLAN_SYSTEM.md 참조)
+- 신규 기능: 정상 동작 + 엣지 케이스 + props 검증 테스트 필수
+- C01 단방향 의존성 준수
+GUIDE
     ;;
-  development)
-    echo "C01, C02, C03, C07" >> "$CURRENT_CONTEXT"
+  bug)
+    cat >> "$CURRENT_CONTEXT" <<GUIDE
+- 재현 테스트 먼저 작성 (실패 → 수정 → 통과)
+- 수정 범위 최소화, 사이드이펙트 확인
+GUIDE
     ;;
-  stabilization)
-    echo "C01, C02, C03, C04, C07" >> "$CURRENT_CONTEXT"
+  refactor)
+    cat >> "$CURRENT_CONTEXT" <<GUIDE
+- 기존 동작 보존 확인 (테스트 먼저)
+- 한 번에 하나의 관심사만 리팩터링
+GUIDE
     ;;
-  production)
-    echo "C01, C02, C03, C04, C05, C07" >> "$CURRENT_CONTEXT"
+  *)
+    printf '- CLAUDE.md 규칙 1~5 준수\n' >> "$CURRENT_CONTEXT"
     ;;
 esac
 
-# ============================================================================
-# 4. 현재 context 줄 수 계산 (예산 확인)
-# ============================================================================
-context_lines=$(wc -l < "$CURRENT_CONTEXT" || echo "0")
-max_budget=2000
-budget_pct=$((context_lines * 100 / max_budget))
+# 예산 계산
+_lines=$(wc -l < "$CURRENT_CONTEXT" | tr -d '[:space:]')
+_pct=$(( _lines * 100 / MAX_LINES ))
 
-echo "" >> "$CURRENT_CONTEXT"
-echo "## Context Budget" >> "$CURRENT_CONTEXT"
-echo "" >> "$CURRENT_CONTEXT"
-echo "- 사용 중: $context_lines 줄" >> "$CURRENT_CONTEXT"
-echo "- 한계: $max_budget 줄" >> "$CURRENT_CONTEXT"
-echo "- 사용률: ${budget_pct}%" >> "$CURRENT_CONTEXT"
+cat >> "$CURRENT_CONTEXT" <<FOOTER
 
-# ============================================================================
-# 5. 콘솔 출력
-# ============================================================================
-echo "" >&2
-cat "$CURRENT_CONTEXT" | head -30 >&2
-echo "..." >&2
-echo "" >&2
-echo ">>> [context-loader] Context loaded successfully" >&2
-echo ">>> [context-loader] Context file: $CURRENT_CONTEXT" >&2
-echo ">>> [context-loader] Context budget: ${budget_pct}% ($context_lines / $max_budget)" >&2
+## Context Budget
+
+- 사용: ${_lines}줄 / ${MAX_LINES}줄 (${_pct}%)
+FOOTER
+
+printf '[context-loader] done: %d/%d lines (%d%%)\n' "$_lines" "$MAX_LINES" "$_pct" >&2
+
+if [ "$_lines" -gt "$WARN_LINES" ]; then
+  printf 'WARN: 컨텍스트 예산 경고 — gc-agent --scan --collect 실행 권장\n' >&2
+fi
 
 exit 0

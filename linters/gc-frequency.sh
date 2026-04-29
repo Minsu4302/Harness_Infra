@@ -1,44 +1,42 @@
-#!/bin/bash
+#!/bin/sh
+# C04 — GC 스캔 주 1회 이상 검증
+# 활성 phase: stab, prod
 
-##############################################################################
-# C06 — GC Frequency Linter
-#
-# 역할: GC (Garbage Collection) 실행 빈도 검증
-#   - logs/events에 최근 gc_scan_complete 이벤트 확인
-#   - planning phase: 경고 (필수 아님)
-# 활성 phase: planning
-##############################################################################
-
-set -euo pipefail
-
-HARNESS_ROOT="${HARNESS_ROOT:-.}"
+set -eu
+HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 HARNESS_PHASE="${HARNESS_PHASE:-development}"
+. "${HARNESS_ROOT}/linters/_lib.sh"
 
-# _lib.sh 로드
-source "${HARNESS_ROOT}/linters/_lib.sh"
-
-# Phase 필터
-if ! is_phase_active "C06"; then
-  lint_pass "C06" "현재 phase에서 비활성"
-  exit 0
-fi
+# dev/planning에서 비활성
+case "$HARNESS_PHASE" in
+  planning|dev|development)
+    lint_pass "C04" "현재 phase에서 비활성"; exit 0 ;;
+esac
 
 EVENTS_DIR="${HARNESS_ROOT}/logs/events"
+THRESHOLD_DAYS=7
 
-# logs/events 디렉토리 확인
-if [[ ! -d "$EVENTS_DIR" ]]; then
-  lint_warn "C06" "logs/events 디렉토리 없음 (gc-agent 아직 실행되지 않음)"
+if [ ! -d "$EVENTS_DIR" ]; then
+  lint_warn "C04" "logs/events 없음 — gc-agent가 아직 실행되지 않음"
   exit 0
 fi
 
-# 최근 gc_scan_complete 이벤트 확인
-local gc_events=$(find "$EVENTS_DIR" -name "*.jsonl" -type f 2>/dev/null -exec grep -l "gc_scan_complete" {} \; 2>/dev/null | wc -l || echo "0")
+# 최근 7일 내 gc_scan_complete 이벤트 확인
+_found=0
+_cutoff=$(date -u +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
 
-if (( gc_events > 0 )); then
-  lint_pass "C06" "GC 스캔 기록 확인됨"
+for _f in "$EVENTS_DIR"/*.jsonl; do
+  [ -f "$_f" ] || continue
+  if grep -q "gc_scan_complete" "$_f" 2>/dev/null; then
+    _found=1
+    break
+  fi
+done
+
+if [ "$_found" = "1" ]; then
+  lint_pass "C04" "GC 스캔 기록 확인됨 (${THRESHOLD_DAYS}일 이내)"
   exit 0
 fi
 
-# planning phase에서는 경고만 표시 (필수 아님)
-lint_warn "C06" "GC 스캔이 아직 실행되지 않음"
-exit 0
+lint_fail "C04" "최근 ${THRESHOLD_DAYS}일 내 GC 스캔 없음 — scripts/gc-agent.sh --scan --collect 실행 필요"
+exit 1

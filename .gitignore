@@ -1,0 +1,14 @@
+# 런타임 생성 파일 — gc-agent, context-loader가 자동 기록
+logs/metrics/
+logs/traces/
+logs/events/
+
+# 세션 컨텍스트 — 세션마다 재생성
+.harness/context/current.md
+.harness/reports/last-check.json
+.harness/reports/debt-report.md
+.harness/reports/history/
+
+# OS
+.DS_Store
+Thumbs.db

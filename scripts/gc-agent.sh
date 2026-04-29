@@ -1,205 +1,257 @@
-#!/bin/bash
-
-##############################################################################
-# gc-agent.sh — 기술 부채 관리 및 관측성 수집
+#!/bin/sh
+# gc-agent.sh — 기술 부채 스캔 및 관측성 수집
 #
-# 모드:
-#   --scan: debt-report.md 스캔 및 업데이트
-#   --collect: logs/ 디렉토리에 메트릭 및 이벤트 수집
-#   --scan --collect: 스캔 후 자동으로 logs 수집
-#
-##############################################################################
+# 사용법:
+#   gc-agent.sh --scan              debt-report.md 갱신
+#   gc-agent.sh --collect           logs/ 수집
+#   gc-agent.sh --scan --collect    스캔 후 수집
 
-set -euo pipefail
+set -eu
 
-HARNESS_ROOT="${HARNESS_ROOT:-.}"
+HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 HARNESS_PHASE="${HARNESS_PHASE:-development}"
-MODE="scan"  # 기본값
 
-# 옵션 파싱
-SCAN=false
-COLLECT=false
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --scan)
-      SCAN=true
-      shift
-      ;;
-    --collect)
-      COLLECT=true
-      shift
-      ;;
-    *)
-      shift
-      ;;
+SCAN=0
+COLLECT=0
+for _arg in "$@"; do
+  case "$_arg" in
+    --scan)    SCAN=1 ;;
+    --collect) COLLECT=1 ;;
   esac
 done
-
-# 기본값: --scan이 지정되지 않으면 --scan 실행
-if [[ "$SCAN" == false && "$COLLECT" == false ]]; then
-  SCAN=true
-fi
+[ "$SCAN" -eq 0 ] && [ "$COLLECT" -eq 0 ] && SCAN=1
 
 DEBT_REPORT="${HARNESS_ROOT}/.harness/reports/debt-report.md"
 LAST_CHECK="${HARNESS_ROOT}/.harness/reports/last-check.json"
 CONTEXT_FILE="${HARNESS_ROOT}/.harness/context/current.md"
 LOGS_DIR="${HARNESS_ROOT}/logs"
 
-TODAY=$(date +%Y-%m-%d)
+TODAY=$(date +%Y-%m-%d 2>/dev/null || date +%Y%m%d)
 METRICS_FILE="${LOGS_DIR}/metrics/${TODAY}.jsonl"
 TRACES_FILE="${LOGS_DIR}/traces/${TODAY}.jsonl"
 EVENTS_FILE="${LOGS_DIR}/events/${TODAY}.jsonl"
 
-# ============================================================================
-# SCAN 모드: debt-report.md 생성
-# ============================================================================
-scan_debt() {
-  echo ">>> [gc-agent] Scanning for technical debt..."
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
 
-  # debt-report.md 초기화
+# ── PLUGIN HOOKS ─────────────────────────────────────────────────────────────
+# run_plugin_hooks HOOK_POINT
+# plugins/*/plugin.yaml 순회 → hooks 필드에서 HOOK_POINT 매칭 → hook.sh 실행
+run_plugin_hooks() {
+  _hook_point="$1"
+  _plugins_dir="${HARNESS_ROOT}/plugins"
+
+  [ -d "$_plugins_dir" ] || return 0
+
+  for _yaml in "$_plugins_dir"/*/plugin.yaml; do
+    [ -f "$_yaml" ] || continue
+    _plugin_dir=$(dirname "$_yaml")
+    _plugin_name=$(grep '^name:' "$_yaml" 2>/dev/null | sed 's/name:[[:space:]]*//' | tr -d '"' | head -1)
+    _plugin_name="${_plugin_name:-$(basename "$_plugin_dir")}"
+
+    # hooks 필드에서 HOOK_POINT 매칭 확인
+    if ! grep -q "$_hook_point" "$_yaml" 2>/dev/null; then
+      continue
+    fi
+
+    # requires_env 검사 — 미설정 환경변수 있으면 skip
+    _skip=0
+    while IFS= read -r _env_var; do
+      _env_var=$(echo "$_env_var" | tr -d '[:space:]-')
+      [ -z "$_env_var" ] && continue
+      # 환경변수 값 확인 (eval 없이 간접 참조)
+      _val=$(sh -c "echo \${${_env_var}:-}" 2>/dev/null || echo "")
+      if [ -z "$_val" ]; then
+        printf '[gc-agent] WARN: plugin [%s] requires_env %s 미설정 — skip\n' \
+          "$_plugin_name" "$_env_var" >&2
+        _skip=1
+        break
+      fi
+    done <<ENVEOF
+$(grep -A 20 '^requires_env:' "$_yaml" 2>/dev/null | grep '^\s*-' | sed 's/.*-[[:space:]]*//')
+ENVEOF
+
+    [ "$_skip" = "1" ] && continue
+
+    # hook.sh 실행
+    _hook_script="${_plugin_dir}/hook.sh"
+    _ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%Y%m%dT%H%M%SZ)
+    _trace_file="${LOGS_DIR}/traces/${_ts}_${_plugin_name}_${_hook_point}.log"
+    mkdir -p "$(dirname "$_trace_file")"
+
+    if [ -f "$_hook_script" ]; then
+      printf '[gc-agent] plugin [%s] hook %s 실행\n' "$_plugin_name" "$_hook_point" >&2
+      _t_start=$(date +%s 2>/dev/null || echo "0")
+      sh "$_hook_script" > "$_trace_file" 2>&1 && _hook_exit=0 || _hook_exit=$?
+      _t_end=$(date +%s 2>/dev/null || echo "0")
+      _dur_ms=$(( (_t_end - _t_start) * 1000 ))
+      printf '{"timestamp":"%s","script":"%s/hook.sh","mode":"%s","duration_ms":%d,"exit_code":%d}\n' \
+        "$NOW" "$_plugin_name" "$_hook_point" "$_dur_ms" "$_hook_exit" >> "${LOGS_DIR}/traces/${TODAY}.jsonl"
+      printf '[gc-agent] plugin [%s] hook 완료 (exit=%d) → %s\n' \
+        "$_plugin_name" "$_hook_exit" "$_trace_file" >&2
+    else
+      printf '[gc-agent] plugin [%s] hook.sh 없음 — skip (%s)\n' \
+        "$_plugin_name" "$_hook_script" >&2
+      printf 'hook.sh not found: %s\n' "$_hook_script" > "$_trace_file"
+    fi
+  done
+}
+
+# ── SCAN ─────────────────────────────────────────────────────────────────────
+scan_debt() {
+  printf '[gc-agent] scanning...\n' >&2
   mkdir -p "$(dirname "$DEBT_REPORT")"
-  cat > "$DEBT_REPORT" << 'EOF'
+
+  CRITICAL_ITEMS=""
+  WARN_ITEMS=""
+
+  # 스크립트 크기 검사 (C03 선행)
+  for _f in "${HARNESS_ROOT}"/scripts/*.sh "${HARNESS_ROOT}"/linters/*.sh; do
+    [ -f "$_f" ] || continue
+    _lines=$(wc -l < "$_f" | tr -d '[:space:]')
+    if [ "$_lines" -gt 1000 ]; then
+      CRITICAL_ITEMS="${CRITICAL_ITEMS}\n- ${_f} (${_lines}줄 > 1000)"
+    elif [ "$_lines" -gt 800 ]; then
+      WARN_ITEMS="${WARN_ITEMS}\n- ${_f} (${_lines}줄 > 800)"
+    fi
+  done
+
+  # HARNESS.md 크기 검사
+  if [ -f "${HARNESS_ROOT}/HARNESS.md" ]; then
+    _hlines=$(wc -l < "${HARNESS_ROOT}/HARNESS.md" | tr -d '[:space:]')
+    if [ "$_hlines" -gt 100 ]; then
+      WARN_ITEMS="${WARN_ITEMS}\n- HARNESS.md (${_hlines}줄 > 100)"
+    fi
+  fi
+
+  # debt-report.md 기록
+  cat > "$DEBT_REPORT" <<REPORT
 ---
 title: Technical Debt Report
 watches:
   - scripts/
   - linters/
-last_scanned: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+last_scanned: ${NOW}
 ---
 
 # Technical Debt Report
 
-## CRITICAL Issues
+## CRITICAL
+$([ -n "$CRITICAL_ITEMS" ] && printf '%b' "$CRITICAL_ITEMS" || printf '없음')
 
-(None detected yet)
-
-## WARNING Issues
-
-(None detected yet)
-
-## INFO Issues
-
-(None detected yet)
+## WARN
+$([ -n "$WARN_ITEMS" ] && printf '%b' "$WARN_ITEMS" || printf '없음')
 
 ---
-Generated by gc-agent.sh
-EOF
+Generated by gc-agent --scan at ${NOW}
+REPORT
 
-  # 실제 스캔 로직은 여기에 추가
-  # 지금은 템플릿만 생성
+  # post-scan 훅 실행
+  run_plugin_hooks "post-scan"
+
+  printf '[gc-agent] scan complete: %s\n' "$DEBT_REPORT" >&2
 }
 
-# ============================================================================
-# COLLECT 모드: logs/ 디렉토리에 수집
-# ============================================================================
+# ── COLLECT ───────────────────────────────────────────────────────────────────
 collect_logs() {
-  echo ">>> [gc-agent] Collecting metrics and events..."
+  printf '[gc-agent] collecting logs...\n' >&2
+  mkdir -p "${LOGS_DIR}/metrics" "${LOGS_DIR}/traces" "${LOGS_DIR}/events"
 
-  mkdir -p "${LOGS_DIR}/"{metrics,traces,events}
-
-  # 1. last-check.json에서 constraint 결과 → logs/events
-  if [[ -f "$LAST_CHECK" ]]; then
-    local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local pass_rate=0
-
-    # JSON에서 pass_rate 추출
-    if grep -q '"pass_rate"' "$LAST_CHECK"; then
-      pass_rate=$(grep -o '"pass_rate":[0-9.]*' "$LAST_CHECK" | grep -o '[0-9.]*' || echo "0")
+  # 1. last-check.json → events + metrics
+  if [ -f "$LAST_CHECK" ]; then
+    _pass=$(grep '"pass"' "$LAST_CHECK" | grep -o '[0-9]*' | head -1 || echo "0")
+    _fail=$(grep '"fail"' "$LAST_CHECK" | grep -o '[0-9]*' | head -1 || echo "0")
+    _total=$(( _pass + _fail ))
+    if [ "$_total" -gt 0 ]; then
+      _rate=$(( _pass * 100 / _total ))
+    else
+      _rate=100
     fi
+    printf '{"timestamp":"%s","metric_name":"constraint_pass_rate","value":%d,"unit":"%%","source":"constraint-check"}\n' \
+      "$NOW" "$_rate" >> "$METRICS_FILE"
 
-    # 메트릭 기록
-    echo "{\"timestamp\":\"${timestamp}\",\"metric_name\":\"constraint_pass_rate\",\"value\":${pass_rate},\"unit\":\"%\",\"source\":\"constraint-check\"}" >> "$METRICS_FILE"
+    # FAIL 이벤트 기록
+    grep '"status":"FAIL"' "$LAST_CHECK" 2>/dev/null | \
+      grep -o '"id":"[^"]*"' | sed 's/"id":"//;s/"//' | \
+      while read -r _id; do
+        printf '{"timestamp":"%s","event_type":"constraint_fail","constraint_id":"%s","severity":"WARN","detail":"constraint failed"}\n' \
+          "$NOW" "$_id" >> "$EVENTS_FILE"
+      done || true
+  fi
 
-    # FAIL 이벤트가 있으면 기록
-    if grep -q '"status":"FAIL"' "$LAST_CHECK"; then
-      while IFS= read -r line; do
-        if echo "$line" | grep -q '"constraint_id"'; then
-          local constraint_id=$(echo "$line" | grep -o '"constraint_id":"[^"]*"' | grep -o '[^"]*"$' | tr -d '"')
-          echo "{\"timestamp\":\"${timestamp}\",\"event_type\":\"constraint_fail\",\"constraint_id\":\"${constraint_id}\",\"severity\":\"WARN\",\"detail\":\"constraint failed\"}" >> "$EVENTS_FILE"
-        fi
-      done < "$LAST_CHECK"
+  # 2. debt-report.md → CRITICAL 이벤트
+  if [ -f "$DEBT_REPORT" ]; then
+    _crit=$(awk '/^## CRITICAL/{f=1;next} /^## /{f=0} f && /^-/' "$DEBT_REPORT" 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [ "${_crit:-0}" -gt 0 ]; then
+      printf '{"timestamp":"%s","event_type":"debt_detected","constraint_id":null,"severity":"CRITICAL","detail":"%d critical items"}\n' \
+        "$NOW" "$_crit" >> "$EVENTS_FILE"
     fi
   fi
 
-  # 2. debt-report.md에서 CRITICAL/WARN → logs/events
-  if [[ -f "$DEBT_REPORT" ]]; then
-    local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # 3. context/current.md → context_budget_pct 메트릭
+  if [ -f "$CONTEXT_FILE" ]; then
+    _clines=$(wc -l < "$CONTEXT_FILE" | tr -d '[:space:]')
+    _max=400
+    _pct=$(( _clines * 100 / _max ))
+    printf '{"timestamp":"%s","metric_name":"context_budget_pct","value":%d,"unit":"%%","source":"context-loader"}\n' \
+      "$NOW" "$_pct" >> "$METRICS_FILE"
 
-    if grep -q "^## CRITICAL" "$DEBT_REPORT"; then
-      local critical_count=$(grep -A 100 "^## CRITICAL" "$DEBT_REPORT" | grep -c "^- " || echo "0")
-      if [[ $critical_count -gt 0 ]]; then
-        echo "{\"timestamp\":\"${timestamp}\",\"event_type\":\"debt_detected\",\"constraint_id\":null,\"severity\":\"CRITICAL\",\"detail\":\"${critical_count} critical debt items\"}" >> "$EVENTS_FILE"
+    # budget_warn_streak 계산 (오늘 기록에서 80% 초과 연속 횟수)
+    _streak=0
+    if [ -f "$METRICS_FILE" ]; then
+      while IFS= read -r _line; do
+        case "$_line" in *'"context_budget_pct"'*)
+          _v=$(echo "$_line" | grep -o '"value":[0-9]*' | grep -o '[0-9]*' | head -1 || echo "0")
+          if [ "${_v:-0}" -gt 80 ]; then
+            _streak=$((_streak + 1))
+          else
+            _streak=0
+          fi
+        esac
+      done < "$METRICS_FILE"
+    fi
+
+    # last-check.json의 budget_warn_streak 갱신 (jq 없이 sed)
+    if [ -f "$LAST_CHECK" ]; then
+      sed "s/\"budget_warn_streak\":[0-9]*/\"budget_warn_streak\":${_streak}/" \
+        "$LAST_CHECK" > "${LAST_CHECK}.tmp" && mv "${LAST_CHECK}.tmp" "$LAST_CHECK"
+    fi
+
+    if [ "$_streak" -gt 0 ]; then
+      printf '{"timestamp":"%s","event_type":"budget_warn","constraint_id":"C07","severity":"WARN","detail":"budget_warn_streak: %d"}\n' \
+        "$NOW" "$_streak" >> "$EVENTS_FILE"
+    fi
+  fi
+
+  # 4. task duration 메트릭
+  _task="${HARNESS_ROOT}/.harness/session/task.md"
+  if [ -f "$_task" ]; then
+    _started=$(grep '^started_at:' "$_task" 2>/dev/null | sed 's/started_at:[[:space:]]*//' | tr -d '"' | head -1)
+    if [ -n "$_started" ] && [ "$_started" != '""' ]; then
+      _start=$(date -d "$_started" +%s 2>/dev/null || \
+               date -j -f "%Y-%m-%dT%H:%M:%SZ" "$_started" +%s 2>/dev/null || echo "0")
+      _now_s=$(date +%s 2>/dev/null || echo "0")
+      if [ "$_start" != "0" ] && [ "$_now_s" != "0" ]; then
+        _dur_h=$(( (_now_s - _start) / 3600 ))
+        printf '{"timestamp":"%s","metric_name":"task_duration_hours","value":%d,"unit":"h","source":"task.md"}\n' \
+          "$NOW" "$_dur_h" >> "$METRICS_FILE"
       fi
     fi
   fi
 
-  # 3. context/current.md 줄 수 → logs/metrics (budget 계산)
-  if [[ -f "$CONTEXT_FILE" ]]; then
-    local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local line_count=$(wc -l < "$CONTEXT_FILE" || echo "0")
-    local max_budget=2000
-    local budget_pct=$(echo "scale=1; ($line_count * 100) / $max_budget" | bc -l)
+  # 5. 트레이스 기록
+  printf '{"timestamp":"%s","script":"scripts/gc-agent.sh","mode":"collect","duration_ms":0,"exit_code":0}\n' \
+    "$NOW" >> "$TRACES_FILE"
 
-    echo "{\"timestamp\":\"${timestamp}\",\"metric_name\":\"context_budget_pct\",\"value\":${budget_pct},\"unit\":\"%\",\"source\":\"context-loader\"}" >> "$METRICS_FILE"
+  # gc_scan_complete 이벤트
+  printf '{"timestamp":"%s","event_type":"gc_scan_complete","constraint_id":null,"severity":"INFO","detail":"scan+collect"}\n' \
+    "$NOW" >> "$EVENTS_FILE"
 
-    # budget_warn_streak 업데이트
-    update_budget_warn_streak "$budget_pct"
-  fi
-
-  # 4. 실행 트레이스 기록
-  local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  echo "{\"timestamp\":\"${timestamp}\",\"script\":\"scripts/gc-agent.sh\",\"mode\":\"collect\",\"duration_ms\":0,\"exit_code\":0}" >> "$TRACES_FILE"
-
-  echo ">>> [gc-agent] Logs collected to: ${LOGS_DIR}/"
+  printf '[gc-agent] collect complete: logs/%s/\n' "$TODAY" >&2
 }
 
-# ============================================================================
-# budget_warn_streak 업데이트
-# ============================================================================
-update_budget_warn_streak() {
-  local current_pct="$1"
-  local threshold=80
+# ── 실행 ─────────────────────────────────────────────────────────────────────
+[ "$SCAN" -eq 1 ] && scan_debt
+[ "$COLLECT" -eq 1 ] && collect_logs
 
-  # last-check.json 초기화
-  mkdir -p "$(dirname "$LAST_CHECK")"
-
-  if [[ ! -f "$LAST_CHECK" ]]; then
-    echo '{"status":"PASS","budget_warn_streak":0,"constraints":{}}' > "$LAST_CHECK"
-  fi
-
-  # streak 계산: 최근 logs/metrics에서 80% 초과 연속 확인
-  local streak=0
-  if [[ -f "$METRICS_FILE" ]]; then
-    while IFS= read -r line; do
-      if echo "$line" | grep -q '"metric_name":"context_budget_pct"'; then
-        local value=$(echo "$line" | grep -o '"value":[0-9.]*' | grep -o '[0-9.]*')
-        if (( $(echo "$value > $threshold" | bc -l) )); then
-          streak=$((streak + 1))
-        else
-          streak=0
-        fi
-      fi
-    done < "$METRICS_FILE"
-  fi
-
-  # last-check.json 업데이트
-  if command -v jq &> /dev/null; then
-    jq ".budget_warn_streak=$streak" "$LAST_CHECK" > "${LAST_CHECK}.tmp" && mv "${LAST_CHECK}.tmp" "$LAST_CHECK"
-  fi
-}
-
-# ============================================================================
-# 메인 실행
-# ============================================================================
-
-if [[ "$SCAN" == true ]]; then
-  scan_debt
-fi
-
-if [[ "$COLLECT" == true ]]; then
-  collect_logs
-fi
-
-echo ">>> [gc-agent] Done"
+printf '[gc-agent] done\n' >&2
 exit 0
