@@ -187,13 +187,19 @@ collect_logs() {
     fi
   fi
 
-  # 3. context/current.md → context_budget_pct 메트릭
+  # 3. context/current.md → context_budget_pct + token_estimate_input 메트릭
   if [ -f "$CONTEXT_FILE" ]; then
     _clines=$(wc -l < "$CONTEXT_FILE" | tr -d '[:space:]')
     _max=400
     _pct=$(( _clines * 100 / _max ))
     printf '{"timestamp":"%s","metric_name":"context_budget_pct","value":%d,"unit":"%%","source":"context-loader"}\n' \
       "$NOW" "$_pct" >> "$METRICS_FILE"
+
+    # 토큰 추정: bytes / 3 (한국어+영어 혼합 텍스트 평균 3바이트/토큰)
+    _cbytes=$(wc -c < "$CONTEXT_FILE" | tr -d '[:space:]')
+    _token_est=$(( _cbytes / 3 ))
+    printf '{"timestamp":"%s","metric_name":"token_estimate_input","value":%d,"unit":"tokens","source":"context-loader"}\n' \
+      "$NOW" "$_token_est" >> "$METRICS_FILE"
 
     # budget_warn_streak 계산 (오늘 기록에서 80% 초과 연속 횟수)
     _streak=0
