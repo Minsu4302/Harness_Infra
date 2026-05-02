@@ -147,15 +147,18 @@ fi
 # 예산 계산
 _lines=$(wc -l < "$CURRENT_CONTEXT" | tr -d '[:space:]')
 _pct=$(( _lines * 100 / MAX_LINES ))
+_bytes=$(wc -c < "$CURRENT_CONTEXT" | tr -d '[:space:]')
+_token_est=$(( _bytes / 3 ))
 
 cat >> "$CURRENT_CONTEXT" <<FOOTER
 
 ## Context Budget
 
 - 사용: ${_lines}줄 / ${MAX_LINES}줄 (${_pct}%)
+- 입력 토큰 추정: ~${_token_est} tokens
 FOOTER
 
-printf '[context-loader] done: %d/%d lines (%d%%)\n' "$_lines" "$MAX_LINES" "$_pct" >&2
+printf '[context-loader] done: %d/%d lines (%d%%) ~%d tokens\n' "$_lines" "$MAX_LINES" "$_pct" "$_token_est" >&2
 
 if [ "$_lines" -gt "$WARN_LINES" ]; then
   printf 'WARN: 컨텍스트 예산 경고 — gc-agent --scan --collect 실행 권장\n' >&2
