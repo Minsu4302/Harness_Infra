@@ -4,6 +4,8 @@
 # 사용법:
 #   rag-search.sh --task-file path/to/task.md [--top K] [--excerpt N]
 #   rag-search.sh --query "keyword1 keyword2" [--top K] [--excerpt N]
+#   rag-search.sh --no-cache        캐시 무시 (강제 재검색)
+#   rag-search.sh --no-summaries    요약 캐시 미사용 (전체 발췌)
 #
 # 출력: 관련 문서 발췌 (마크다운, current.md 주입용)
 # 종료코드: 0 (항상 — 검색 결과 없어도 정상)
@@ -15,13 +17,17 @@ TOP_K=3
 EXCERPT_LINES=12
 QUERY=""
 TASK_FILE=""
+NO_CACHE=0
+USE_SUMMARIES=1
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --top)       TOP_K="$2";         shift 2 ;;
-    --excerpt)   EXCERPT_LINES="$2"; shift 2 ;;
-    --query)     QUERY="$2";         shift 2 ;;
-    --task-file) TASK_FILE="$2";     shift 2 ;;
+    --top)           TOP_K="$2";         shift 2 ;;
+    --excerpt)       EXCERPT_LINES="$2"; shift 2 ;;
+    --query)         QUERY="$2";         shift 2 ;;
+    --task-file)     TASK_FILE="$2";     shift 2 ;;
+    --no-cache)      NO_CACHE=1;         shift ;;
+    --no-summaries)  USE_SUMMARIES=0;    shift ;;
     *) shift ;;
   esac
 done
@@ -46,6 +52,23 @@ _keywords=$(printf '%s' "$QUERY" | tr -cs 'a-zA-Z가-힣0-9' '\n' | \
 
 printf '[rag-search] keywords: %s\n' "$_keywords" >&2
 
+# ── A2: 쿼리 해시 캐시 ────────────────────────────────────────────────────────
+
+_cache_dir="${HARNESS_ROOT}/.harness/cache/rag"
+_cache_key=$(printf '%s' "${_keywords} ${TOP_K}" | cksum | cut -d' ' -f1)
+_cache_file="${_cache_dir}/${_cache_key}.md"
+
+if [ "$NO_CACHE" = "0" ] && [ -f "$_cache_file" ]; then
+  # 소스 문서가 캐시보다 새로 변경됐으면 무효화
+  _newer=$(find "${HARNESS_ROOT}/docs" -name "*.md" -newer "$_cache_file" 2>/dev/null | head -1)
+  if [ -z "$_newer" ]; then
+    printf '[rag-search] cache hit: %s\n' "$_cache_key" >&2
+    cat "$_cache_file"
+    exit 0
+  fi
+  printf '[rag-search] cache invalidated (docs changed)\n' >&2
+fi
+
 # ── 검색 대상 문서 수집 및 스코어링 ──────────────────────────────────────────
 
 _tmp="${TMPDIR:-/tmp}/rag_$$"
@@ -61,7 +84,6 @@ for _dir in \
 
     _score=0
     for _kw in $_keywords; do
-      # grep -c는 no-match 시 exit 1을 반환하므로 파이프로 exit code 격리
       _cnt=$(grep -ic "$_kw" "$_doc" 2>/dev/null | tr -d '[:space:]')
       _score=$(( _score + ${_cnt:-0} ))
     done
@@ -70,7 +92,6 @@ for _dir in \
   done
 done | sort -rn > "$_tmp" 2>/dev/null || true
 
-# 결과 없으면 조용히 종료
 if [ ! -s "$_tmp" ]; then
   printf '[rag-search] 관련 문서 없음\n' >&2
   rm -f "$_tmp"
@@ -78,6 +99,8 @@ if [ ! -s "$_tmp" ]; then
 fi
 
 # ── 상위 K 문서 발췌 출력 ────────────────────────────────────────────────────
+
+_out="${TMPDIR:-/tmp}/rag_out_$$"
 
 _rank=0
 while IFS=' ' read -r _score _doc; do
@@ -88,21 +111,36 @@ while IFS=' ' read -r _score _doc; do
   _doc_title=$(awk '/^title:/{gsub(/^title:[[:space:]]*/,""); gsub(/"/,""); print; exit}' \
     "$_doc" 2>/dev/null)
   [ -z "$_doc_title" ] && _doc_title=$(basename "$_doc" .md)
-  # score 앞의 0 패딩 제거
   _score_clean=$(printf '%s' "$_score" | sed 's/^0*//')
   [ -z "$_score_clean" ] && _score_clean=0
 
   printf '\n### [%d] %s\n\n> `%s` | relevance: %s\n\n' \
     "$_rank" "$_doc_title" "$_rel" "$_score_clean"
 
-  # YAML frontmatter 제외하고 본문 EXCERPT_LINES 줄 출력
-  awk -v n="$EXCERPT_LINES" '
-    BEGIN { in_fm=0; body=0; out=0 }
-    NR==1 && /^---$/ { in_fm=1; next }
-    in_fm && /^---$/ { in_fm=0; body=1; next }
-    in_fm { next }
-    body && out < n { print; out++ }
-  ' "$_doc"
-done < "$_tmp"
+  # A3: summaries/ 캐시 우선 사용
+  _summary="${HARNESS_ROOT}/.harness/cache/summaries/${_rel}"
+  if [ "$USE_SUMMARIES" = "1" ] && [ -f "$_summary" ]; then
+    cat "$_summary"
+  else
+    awk -v n="$EXCERPT_LINES" '
+      BEGIN { in_fm=0; body=0; out=0 }
+      NR==1 && /^---$/ { in_fm=1; next }
+      in_fm && /^---$/ { in_fm=0; body=1; next }
+      in_fm { next }
+      body && out < n { print; out++ }
+    ' "$_doc"
+  fi
+done < "$_tmp" > "$_out"
 
 rm -f "$_tmp"
+
+# ── A2: 캐시에 결과 저장 ─────────────────────────────────────────────────────
+
+if [ "$NO_CACHE" = "0" ]; then
+  mkdir -p "$_cache_dir"
+  cp "$_out" "$_cache_file"
+  printf '[rag-search] cache written: %s\n' "$_cache_key" >&2
+fi
+
+cat "$_out"
+rm -f "$_out"
