@@ -91,6 +91,20 @@ _constraints=$(get_active_constraints)
 echo "$_constraints" | tr ' ' '\n' | grep -v '^$' | \
   while read -r _c; do echo "- $_c"; done >> "$CURRENT_CONTEXT"
 
+cat >> "$CURRENT_CONTEXT" <<RAG_HEADER
+
+## 관련 문서 (RAG)
+
+RAG_HEADER
+
+_rag_search="${HARNESS_ROOT}/scripts/rag-search.sh"
+if [ -x "$_rag_search" ] && [ -f "$TASK_FILE" ]; then
+  "$_rag_search" --task-file "$TASK_FILE" --top 3 >> "$CURRENT_CONTEXT" 2>/dev/null || \
+    printf '(RAG 검색 실패 — 수동으로 관련 문서를 확인하세요)\n' >> "$CURRENT_CONTEXT"
+else
+  printf '(rag-search.sh 없음 또는 task.md 없음)\n' >> "$CURRENT_CONTEXT"
+fi
+
 cat >> "$CURRENT_CONTEXT" <<SECTION
 
 ## 기술 부채 요약
