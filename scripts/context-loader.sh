@@ -119,37 +119,16 @@ else
   printf '(debt-report.md 없음 — gc-agent --scan 실행 후 재로드)\n' >> "$CURRENT_CONTEXT"
 fi
 
-# 태스크 유형별 추가 컨텍스트 주입
-cat >> "$CURRENT_CONTEXT" <<SECTION
+# 태스크 유형별 CoT 프롬프트 주입
+printf '\n## 태스크 프롬프트 (%s)\n\n' "$TASK_TYPE" >> "$CURRENT_CONTEXT"
 
-## 태스크 가이드 (${TASK_TYPE})
-
-SECTION
-
-case "$TASK_TYPE" in
-  feature)
-    cat >> "$CURRENT_CONTEXT" <<GUIDE
-- EXEC_PLAN 작성 후 진행 (PLAN_SYSTEM.md 참조)
-- 신규 기능: 정상 동작 + 엣지 케이스 + props 검증 테스트 필수
-- C01 단방향 의존성 준수
-GUIDE
-    ;;
-  bug)
-    cat >> "$CURRENT_CONTEXT" <<GUIDE
-- 재현 테스트 먼저 작성 (실패 → 수정 → 통과)
-- 수정 범위 최소화, 사이드이펙트 확인
-GUIDE
-    ;;
-  refactor)
-    cat >> "$CURRENT_CONTEXT" <<GUIDE
-- 기존 동작 보존 확인 (테스트 먼저)
-- 한 번에 하나의 관심사만 리팩터링
-GUIDE
-    ;;
-  *)
+_prompt_selector="${HARNESS_ROOT}/scripts/prompt-selector.sh"
+if [ -x "$_prompt_selector" ]; then
+  "$_prompt_selector" --task-type "$TASK_TYPE" >> "$CURRENT_CONTEXT" 2>/dev/null || \
     printf '- CLAUDE.md 규칙 1~5 준수\n' >> "$CURRENT_CONTEXT"
-    ;;
-esac
+else
+  printf '- CLAUDE.md 규칙 1~5 준수\n' >> "$CURRENT_CONTEXT"
+fi
 
 # 예산 계산
 _lines=$(wc -l < "$CURRENT_CONTEXT" | tr -d '[:space:]')
