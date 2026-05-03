@@ -2,13 +2,15 @@
 # scripts/rag-search.sh — 키워드 기반 RAG 문서 검색
 #
 # 사용법:
-#   rag-search.sh --task-file path/to/task.md [--top K] [--excerpt N]
+#   rag-search.sh --task-file PATH [--top K] [--excerpt N]
 #   rag-search.sh --query "keyword1 keyword2" [--top K] [--excerpt N]
 #   rag-search.sh --no-cache        캐시 무시 (강제 재검색)
 #   rag-search.sh --no-summaries    요약 캐시 미사용 (전체 발췌)
+#   rag-search.sh --no-mmr          MMR 재랭킹 비활성화
+#   rag-search.sh --lambda 0.5      MMR 다양성 가중치 (0=관련성, 1=다양성, 기본 0.5)
 #
 # 출력: 관련 문서 발췌 (마크다운, current.md 주입용)
-# 종료코드: 0 (항상 — 검색 결과 없어도 정상)
+# 종료코드: 0 (항상)
 
 set -eu
 
@@ -19,6 +21,8 @@ QUERY=""
 TASK_FILE=""
 NO_CACHE=0
 USE_SUMMARIES=1
+USE_MMR=1
+LAMBDA="0.5"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -28,6 +32,8 @@ while [ "$#" -gt 0 ]; do
     --task-file)     TASK_FILE="$2";     shift 2 ;;
     --no-cache)      NO_CACHE=1;         shift ;;
     --no-summaries)  USE_SUMMARIES=0;    shift ;;
+    --no-mmr)        USE_MMR=0;          shift ;;
+    --lambda)        LAMBDA="$2";        shift 2 ;;
     *) shift ;;
   esac
 done
@@ -52,14 +58,13 @@ _keywords=$(printf '%s' "$QUERY" | tr -cs 'a-zA-Z가-힣0-9' '\n' | \
 
 printf '[rag-search] keywords: %s\n' "$_keywords" >&2
 
-# ── A2: 쿼리 해시 캐시 ────────────────────────────────────────────────────────
+# ── A2: 쿼리 해시 캐시 확인 ─────────────────────────────────────────────────
 
 _cache_dir="${HARNESS_ROOT}/.harness/cache/rag"
-_cache_key=$(printf '%s' "${_keywords} ${TOP_K}" | cksum | cut -d' ' -f1)
+_cache_key=$(printf '%s' "${_keywords} ${TOP_K} ${USE_MMR}" | cksum | cut -d' ' -f1)
 _cache_file="${_cache_dir}/${_cache_key}.md"
 
 if [ "$NO_CACHE" = "0" ] && [ -f "$_cache_file" ]; then
-  # 소스 문서가 캐시보다 새로 변경됐으면 무효화
   _newer=$(find "${HARNESS_ROOT}/docs" -name "*.md" -newer "$_cache_file" 2>/dev/null | head -1)
   if [ -z "$_newer" ]; then
     printf '[rag-search] cache hit: %s\n' "$_cache_key" >&2
@@ -69,7 +74,8 @@ if [ "$NO_CACHE" = "0" ] && [ -f "$_cache_file" ]; then
   printf '[rag-search] cache invalidated (docs changed)\n' >&2
 fi
 
-# ── 검색 대상 문서 수집 및 스코어링 ──────────────────────────────────────────
+# ── 검색: 스코어링 + B1 MMR용 키워드 인덱스 수집 ────────────────────────────
+# 임시 파일 형식: score<TAB>doc_path<TAB>kw_idx_list (공백 구분)
 
 _tmp="${TMPDIR:-/tmp}/rag_$$"
 
@@ -80,15 +86,21 @@ for _dir in \
   [ -d "$_dir" ] || continue
   for _doc in "$_dir"/*.md; do
     [ -f "$_doc" ] || continue
-    [ -s "$_doc" ] || continue  # .gitkeep 등 빈 파일 스킵
+    [ -s "$_doc" ] || continue
 
     _score=0
+    _kw_idx=0
+    _matches=""
     for _kw in $_keywords; do
       _cnt=$(grep -ic "$_kw" "$_doc" 2>/dev/null | tr -d '[:space:]')
-      _score=$(( _score + ${_cnt:-0} ))
+      if [ "${_cnt:-0}" -gt 0 ]; then
+        _score=$(( _score + _cnt ))
+        _matches="${_matches}${_kw_idx} "
+      fi
+      _kw_idx=$(( _kw_idx + 1 ))
     done
 
-    [ "$_score" -gt 0 ] && printf '%04d %s\n' "$_score" "$_doc"
+    [ "$_score" -gt 0 ] && printf '%04d\t%s\t%s\n' "$_score" "$_doc" "${_matches% }"
   done
 done | sort -rn > "$_tmp" 2>/dev/null || true
 
@@ -98,14 +110,56 @@ if [ ! -s "$_tmp" ]; then
   exit 0
 fi
 
+# ── B1: MMR 재랭킹 ───────────────────────────────────────────────────────────
+# MMR score(d) = relevance(d) - λ × max_sim(d, selected)
+# max_sim = 선택된 문서들 중 키워드 인덱스 최대 겹침 수
+
+_ranked="${TMPDIR:-/tmp}/rag_ranked_$$"
+
+if [ "$USE_MMR" = "1" ]; then
+  awk -F'\t' -v k="$TOP_K" -v lam="$LAMBDA" '
+  BEGIN { total=0 }
+  { score[++total]=$1+0; doc[total]=$2; kws[total]=$3 }
+  END {
+    for (round=1; round<=k && round<=total; round++) {
+      best=-1; best_val=-9999999
+      for (i=1; i<=total; i++) {
+        if (i in used) continue
+        if (round==1) {
+          s = score[i]
+        } else {
+          max_sim=0
+          n1=split(kws[i], a1, " ")
+          for (j in used) {
+            n2=split(kws[j], a2, " ")
+            sim=0
+            for (x=1; x<=n1; x++)
+              for (y=1; y<=n2; y++)
+                if (a1[x]!="" && a1[x]==a2[y]) sim++
+            if (sim>max_sim) max_sim=sim
+          }
+          s = score[i] - lam * max_sim
+        }
+        if (s > best_val) { best_val=s; best=i }
+      }
+      if (best>0) { printf "%04d\t%s\n", score[best], doc[best]; used[best]=1 }
+    }
+  }
+  ' "$_tmp" > "$_ranked"
+  printf '[rag-search] MMR applied (lambda=%s)\n' "$LAMBDA" >&2
+else
+  awk -F'\t' -v k="$TOP_K" 'NR<=k{printf "%s\t%s\n",$1,$2}' "$_tmp" > "$_ranked"
+fi
+
+rm -f "$_tmp"
+
 # ── 상위 K 문서 발췌 출력 ────────────────────────────────────────────────────
 
 _out="${TMPDIR:-/tmp}/rag_out_$$"
 
 _rank=0
-while IFS=' ' read -r _score _doc; do
+while IFS='	' read -r _score _doc; do
   _rank=$(( _rank + 1 ))
-  [ "$_rank" -gt "$TOP_K" ] && break
 
   _rel=$(printf '%s' "$_doc" | sed "s|${HARNESS_ROOT}/||g")
   _doc_title=$(awk '/^title:/{gsub(/^title:[[:space:]]*/,""); gsub(/"/,""); print; exit}' \
@@ -130,11 +184,11 @@ while IFS=' ' read -r _score _doc; do
       body && out < n { print; out++ }
     ' "$_doc"
   fi
-done < "$_tmp" > "$_out"
+done < "$_ranked" > "$_out"
 
-rm -f "$_tmp"
+rm -f "$_ranked"
 
-# ── A2: 캐시에 결과 저장 ─────────────────────────────────────────────────────
+# ── A2: 결과 캐시 저장 ────────────────────────────────────────────────────────
 
 if [ "$NO_CACHE" = "0" ]; then
   mkdir -p "$_cache_dir"

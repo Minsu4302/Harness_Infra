@@ -64,6 +64,9 @@ if [ -f "$TASK_FILE" ]; then
   _ts=$(date +%Y%m%d_%H%M%S 2>/dev/null || echo "backup")
   cp "$TASK_FILE" "${HISTORY_DIR}/task_${_ts}.md"
   printf '[context-loader] previous task backed up\n' >&2
+  # 완료된 태스크 이력을 세션 버퍼에 자동 기록
+  _sbuf="${HARNESS_ROOT}/scripts/session-buffer.sh"
+  [ -x "$_sbuf" ] && "$_sbuf" --append-from-task "$TASK_FILE" 2>/dev/null || true
 fi
 
 # current.md 생성
@@ -131,6 +134,16 @@ if [ -f "$DEBT_REPORT" ]; then
   fi
 else
   printf '(debt-report.md 없음 — gc-agent --scan 실행 후 재로드)\n' >> "$CURRENT_CONTEXT"
+fi
+
+# 세션 버퍼 주입 (완료된 태스크 이력)
+printf '\n## 세션 버퍼\n\n' >> "$CURRENT_CONTEXT"
+_sbuf="${HARNESS_ROOT}/scripts/session-buffer.sh"
+if [ -x "$_sbuf" ]; then
+  "$_sbuf" --export >> "$CURRENT_CONTEXT" 2>/dev/null || \
+    printf '(버퍼 없음)\n' >> "$CURRENT_CONTEXT"
+else
+  printf '(session-buffer.sh 없음)\n' >> "$CURRENT_CONTEXT"
 fi
 
 # 태스크 유형별 CoT 프롬프트 주입
