@@ -2,7 +2,6 @@ package com.harness.orchestration.service;
 
 import com.harness.orchestration.model.AgentResult;
 import com.harness.orchestration.model.AgentResult.Status;
-import com.harness.orchestration.model.GateRequest;
 import com.harness.orchestration.model.GateResult;
 import com.harness.orchestration.model.GateResult.Decision;
 import org.springframework.stereotype.Service;
@@ -10,10 +9,7 @@ import org.springframework.stereotype.Service;
 @Service
 public class DeploymentGateService {
 
-    public GateResult evaluate(GateRequest request) {
-        AgentResult review = request.getReviewResult();
-        AgentResult security = request.getSecurityResult();
-        AgentResult testGen = request.getTestGenResult();
+    public GateResult evaluate(AgentResult review, AgentResult security, AgentResult testGen) {
 
         boolean securityBlocking = security.getStatus() == Status.FAIL;
         boolean reviewBlocking = review.getStatus() == Status.FAIL;
