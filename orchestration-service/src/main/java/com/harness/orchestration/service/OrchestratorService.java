@@ -47,6 +47,7 @@ public class OrchestratorService {
             Available models:
             - "claude"  : best for nuanced reasoning, complex code review
             - "gemini"  : best for pattern matching, security scanning, fast tasks
+            - "gpt"     : best for code generation, test scaffolding, boilerplate
 
             Rules:
             - docs-only changes (*.md, *.txt): run "review" only with "gemini"
@@ -54,13 +55,15 @@ public class OrchestratorService {
             - new methods or classes: run all three agents
             - security-sensitive changes (auth, crypto, sql): always include "security" with "gemini"
             - assign "claude" to "review" when logic complexity is high
+            - assign "gpt" to "test-gen" by default (best for test scaffolding)
 
             Respond ONLY in this JSON format (no markdown):
             {
               "reasoning": "one sentence explaining your decision",
               "tasks": [
                 {"agent": "security", "model": "gemini", "reason": "..."},
-                {"agent": "review",   "model": "claude", "reason": "..."}
+                {"agent": "review",   "model": "claude", "reason": "..."},
+                {"agent": "test-gen", "model": "gpt",    "reason": "..."}
               ]
             }
             """;
@@ -142,7 +145,7 @@ public class OrchestratorService {
         plan.setTasks(List.of(
                 task("security", "gemini"),
                 task("review",   "claude"),
-                task("test-gen", "gemini")
+                task("test-gen", "gpt")
         ));
         return plan;
     }
