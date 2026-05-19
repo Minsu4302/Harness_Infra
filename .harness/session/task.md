@@ -1,49 +1,52 @@
 ---
 task_type: feature
-title: "RAG 검색 레이어 구현"
-started_at: "2026-05-02T00:00:00Z"
+title: "Layer C-6 — Docker + GCP + GitHub Actions CI/CD"
+complexity: medium
+started_at: "2026-05-19T05:00:00Z"
+status: completed
 done_condition:
-  - "[auto] test: sh scripts/rag-search.sh --query 'feature constraint C01' 실행 시 docs 경로 출력"
-  - "[auto] test: context-loader.sh 실행 후 current.md에 '## 관련 문서 (RAG)' 포함 확인"
-  - "[auto] test: constraint-check.sh exit 0"
-  - "[human] top-3 검색 결과가 현재 태스크와 의미적으로 관련 있는지 확인"
+  - "Dockerfile 멀티스테이지 빌드 (JDK21 builder + JRE21 runtime)"
+  - "deploy.yml — push to main → ghcr.io 이미지 push → GCP SSH 배포"
+  - "orchestrate.yml — PR 이벤트 → GCP:8080 호출 → PR Comment 게시"
+  - "constraint-check.sh exit 0"
 open_questions: []
 ---
 
 ## 개요
 
-현재 `context-loader.sh`는 400줄 고정 예산으로 모든 제약·문서를 정적으로 로딩한다.
-RAG(Retrieval-Augmented Generation) 레이어를 도입해 현재 태스크와 의미적으로
-관련된 제약·ADR·스펙 문서만 동적으로 검색해 컨텍스트에 주입한다.
+Spring Boot 서비스를 Docker 컨테이너로 패키징하고 GCP e2-micro에 배포한다.
+GitHub Actions 두 개 워크플로우로 CI/CD를 완성한다.
 
-구현 방식: 벡터 임베딩 대신 키워드 빈도 스코어링 (문서 < 30개 규모에서 충분).
-설계 결정: Python/Node 미도입 — 셸 스크립트 정체성 유지 (POSIX sh).
+1. deploy.yml  — main push 시 ghcr.io에 이미지 빌드·푸시 → GCP SSH로 재배포
+2. orchestrate.yml — PR 오픈/업데이트 시 GCP 서비스 호출 → PR Comment에 AI 리포트 게시
+
+GCP 설정은 수동 작업 필요 (아래 지침 참고).
 
 EXEC_PLAN:
-goal: RAG 검색 레이어 구현 및 context-loader.sh 동적 로딩 연동
+goal: "Docker 컨테이너화 + GCP 배포 + GitHub Actions CI/CD"
 steps:
   - id: S1
-    action: Git Worktree 생성 (feat/rag-layer)
-    output: c:\harness-rag 워크트리
+    action: "Git Worktree 생성 (feat/deploy)"
+    output: "worktree at ../harness-deploy"
     constraint: C05
-    done_condition: "git worktree list에 feat/rag-layer 브랜치 확인"
+    done_condition: "git worktree list에 feat/deploy 확인"
   - id: S2
-    action: scripts/rag-search.sh 작성 — 키워드 추출·스코어링·발췌 출력
-    output: scripts/rag-search.sh
-    constraint: C01, C09
-    done_condition: "sh scripts/rag-search.sh --query 'feature constraint' 시 문서 경로 출력"
-  - id: S3
-    action: context-loader.sh 수정 — task.md 쿼리 추출 후 rag-search.sh 호출·주입
-    output: scripts/context-loader.sh (수정)
+    action: "Dockerfile 작성 (orchestration-service/Dockerfile)"
+    output: "Dockerfile"
     constraint: C01
-    done_condition: "context-loader.sh 실행 후 current.md에 '## 관련 문서 (RAG)' 포함"
+    done_condition: "멀티스테이지 빌드 파일 존재"
+  - id: S3
+    action: ".github/workflows/deploy.yml 작성"
+    output: "deploy.yml"
+    constraint: C01
+    done_condition: "push to main → ghcr.io + GCP 배포 워크플로우"
   - id: S4
-    action: constraint-check.sh 실행하여 전체 PASS 확인
-    output: exit 0
-    constraint: 전체
-    done_condition: "scripts/constraint-check.sh exit 0"
+    action: ".github/workflows/orchestrate.yml 작성"
+    output: "orchestrate.yml"
+    constraint: C01
+    done_condition: "PR 이벤트 → AI 게이트 → PR Comment 워크플로우"
   - id: S5
-    action: feat/rag-layer 커밋 후 main에 머지, worktree 정리
-    output: main 브랜치 머지 커밋
+    action: "constraint-check.sh PASS 후 main 머지, worktree 정리"
+    output: "main 브랜치 머지 커밋"
     constraint: C05
-    done_condition: "git log main --oneline HEAD~1 에 머지 커밋 확인"
+    done_condition: "constraint-check.sh exit 0 && 머지 커밋 확인"
