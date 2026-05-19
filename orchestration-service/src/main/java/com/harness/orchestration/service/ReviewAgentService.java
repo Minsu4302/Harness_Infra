@@ -1,28 +1,14 @@
 package com.harness.orchestration.service;
 
-import com.anthropic.client.AnthropicClient;
-import com.anthropic.models.messages.Message;
-import com.anthropic.models.messages.MessageCreateParams;
-import com.anthropic.models.messages.Model;
+import com.harness.orchestration.gateway.LlmGateway;
 import com.harness.orchestration.model.AgentRequest;
 import com.harness.orchestration.model.AgentResult;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 @Service
-@RequiredArgsConstructor
 public class ReviewAgentService {
-
-    private final AnthropicClient anthropicClient;
-
-    @Value("${anthropic.model}")
-    private String model;
-
-    @Value("${anthropic.max-tokens}")
-    private int maxTokens;
 
     private static final String SYSTEM_PROMPT = """
             You are a senior code reviewer. Analyze the provided git diff and return a structured review.
@@ -40,20 +26,9 @@ public class ReviewAgentService {
             - FAIL: serious issues (logic bugs, missing error handling, broken patterns)
             """;
 
-    public AgentResult review(AgentRequest request) {
-        String userMessage = buildUserMessage(request);
-
-        Message message = anthropicClient.messages().create(
-                MessageCreateParams.builder()
-                        .model(Model.of(model))
-                        .maxTokens(maxTokens)
-                        .system(SYSTEM_PROMPT)
-                        .addUserMessage(userMessage)
-                        .build()
-        );
-
-        String content = extractText(message);
-        return parseResult(content);
+    public AgentResult review(AgentRequest request, LlmGateway gateway) {
+        String response = gateway.complete(SYSTEM_PROMPT, buildUserMessage(request));
+        return parseResult(response, gateway.modelName());
     }
 
     private String buildUserMessage(AgentRequest request) {
@@ -65,47 +40,26 @@ public class ReviewAgentService {
         return sb.toString();
     }
 
-    private String extractText(Message message) {
-        return message.content().stream()
-                .filter(block -> block.isText())
-                .map(block -> block.asText().text())
-                .findFirst()
-                .orElse("{}");
+    private AgentResult parseResult(String json, String modelName) {
+        AgentResult.Status status = AgentResult.Status.WARN;
+        if (json.contains("\"PASS\"")) status = AgentResult.Status.PASS;
+        else if (json.contains("\"FAIL\"")) status = AgentResult.Status.FAIL;
+
+        String summary = extractField(json, "summary", "Review completed via " + modelName);
+
+        return AgentResult.builder()
+                .agentType("review")
+                .status(status)
+                .summary(summary)
+                .issues(List.of())
+                .build();
     }
 
-    private AgentResult parseResult(String json) {
-        try {
-            AgentResult.Status status = AgentResult.Status.WARN;
-            String summary = "Review completed";
-            List<String> issues = List.of();
-
-            if (json.contains("\"status\": \"PASS\"") || json.contains("\"status\":\"PASS\"")) {
-                status = AgentResult.Status.PASS;
-            } else if (json.contains("\"status\": \"FAIL\"") || json.contains("\"status\":\"FAIL\"")) {
-                status = AgentResult.Status.FAIL;
-            }
-
-            int summaryStart = json.indexOf("\"summary\": \"") + 12;
-            if (summaryStart > 11) {
-                int summaryEnd = json.indexOf("\"", summaryStart);
-                if (summaryEnd > summaryStart) {
-                    summary = json.substring(summaryStart, summaryEnd);
-                }
-            }
-
-            return AgentResult.builder()
-                    .agentType("review")
-                    .status(status)
-                    .summary(summary)
-                    .issues(issues)
-                    .build();
-        } catch (Exception e) {
-            return AgentResult.builder()
-                    .agentType("review")
-                    .status(AgentResult.Status.WARN)
-                    .summary("Review parsing failed: " + e.getMessage())
-                    .issues(List.of())
-                    .build();
-        }
+    private String extractField(String json, String field, String defaultValue) {
+        String key = "\"" + field + "\": \"";
+        int start = json.indexOf(key) + key.length();
+        if (start <= key.length()) return defaultValue;
+        int end = json.indexOf("\"", start);
+        return end > start ? json.substring(start, end) : defaultValue;
     }
 }

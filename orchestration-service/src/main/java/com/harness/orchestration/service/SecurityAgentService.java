@@ -1,28 +1,14 @@
 package com.harness.orchestration.service;
 
-import com.anthropic.client.AnthropicClient;
-import com.anthropic.models.messages.Message;
-import com.anthropic.models.messages.MessageCreateParams;
-import com.anthropic.models.messages.Model;
+import com.harness.orchestration.gateway.LlmGateway;
 import com.harness.orchestration.model.AgentRequest;
 import com.harness.orchestration.model.AgentResult;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 @Service
-@RequiredArgsConstructor
 public class SecurityAgentService {
-
-    private final AnthropicClient anthropicClient;
-
-    @Value("${anthropic.model}")
-    private String model;
-
-    @Value("${anthropic.max-tokens}")
-    private int maxTokens;
 
     private static final String SYSTEM_PROMPT = """
             You are a security engineer. Analyze the git diff for security vulnerabilities.
@@ -41,31 +27,18 @@ public class SecurityAgentService {
             - FAIL: one or more vulnerabilities detected
             """;
 
-    public AgentResult scan(AgentRequest request) {
-        Message message = anthropicClient.messages().create(
-                MessageCreateParams.builder()
-                        .model(Model.of(model))
-                        .maxTokens(maxTokens)
-                        .system(SYSTEM_PROMPT)
-                        .addUserMessage("Git Diff:\n```\n" + request.getDiff() + "\n```")
-                        .build()
-        );
-
-        String content = message.content().stream()
-                .filter(block -> block.isText())
-                .map(block -> block.asText().text())
-                .findFirst()
-                .orElse("{}");
-
-        return parseResult(content);
+    public AgentResult scan(AgentRequest request, LlmGateway gateway) {
+        String response = gateway.complete(SYSTEM_PROMPT,
+                "Git Diff:\n```\n" + request.getDiff() + "\n```");
+        return parseResult(response, gateway.modelName());
     }
 
-    private AgentResult parseResult(String json) {
-        AgentResult.Status status = json.contains("\"FAIL\"") || json.contains("\"status\":\"FAIL\"")
+    private AgentResult parseResult(String json, String modelName) {
+        AgentResult.Status status = json.contains("\"FAIL\"")
                 ? AgentResult.Status.FAIL
                 : AgentResult.Status.PASS;
 
-        String summary = extractField(json, "summary", "Security scan completed");
+        String summary = extractField(json, "summary", "Security scan completed via " + modelName);
 
         return AgentResult.builder()
                 .agentType("security")

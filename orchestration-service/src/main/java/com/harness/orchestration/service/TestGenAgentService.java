@@ -1,28 +1,14 @@
 package com.harness.orchestration.service;
 
-import com.anthropic.client.AnthropicClient;
-import com.anthropic.models.messages.Message;
-import com.anthropic.models.messages.MessageCreateParams;
-import com.anthropic.models.messages.Model;
+import com.harness.orchestration.gateway.LlmGateway;
 import com.harness.orchestration.model.AgentRequest;
 import com.harness.orchestration.model.AgentResult;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 @Service
-@RequiredArgsConstructor
 public class TestGenAgentService {
-
-    private final AnthropicClient anthropicClient;
-
-    @Value("${anthropic.model}")
-    private String model;
-
-    @Value("${anthropic.max-tokens}")
-    private int maxTokens;
 
     private static final String SYSTEM_PROMPT = """
             You are a test engineer. Given a git diff, generate unit test code for new or changed methods.
@@ -40,30 +26,15 @@ public class TestGenAgentService {
             - If diff has no testable code changes, set test_code to empty string
             """;
 
-    public AgentResult generate(AgentRequest request) {
+    public AgentResult generate(AgentRequest request, LlmGateway gateway) {
         String prompt = "Language: " + request.getLanguage() + "\n\n"
                 + "Git Diff:\n```\n" + request.getDiff() + "\n```";
-
-        Message message = anthropicClient.messages().create(
-                MessageCreateParams.builder()
-                        .model(Model.of(model))
-                        .maxTokens(maxTokens)
-                        .system(SYSTEM_PROMPT)
-                        .addUserMessage(prompt)
-                        .build()
-        );
-
-        String content = message.content().stream()
-                .filter(block -> block.isText())
-                .map(block -> block.asText().text())
-                .findFirst()
-                .orElse("{}");
-
-        return parseResult(content);
+        String response = gateway.complete(SYSTEM_PROMPT, prompt);
+        return parseResult(response, gateway.modelName());
     }
 
-    private AgentResult parseResult(String json) {
-        String summary = extractField(json, "summary", "Test generation completed");
+    private AgentResult parseResult(String json, String modelName) {
+        String summary = extractField(json, "summary", "Test generation completed via " + modelName);
         String testCode = extractTestCode(json);
 
         return AgentResult.builder()
