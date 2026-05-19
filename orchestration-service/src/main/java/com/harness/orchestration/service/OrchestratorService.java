@@ -7,17 +7,25 @@ import com.harness.orchestration.model.AgentResult;
 import com.harness.orchestration.model.GateResult;
 import com.harness.orchestration.model.OrchestrationPlan;
 import com.harness.orchestration.model.OrchestrationPlan.AgentTask;
+import com.harness.orchestration.model.PruneResult;
+import com.harness.orchestration.pruner.ContextPruner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrchestratorService {
+
+    static final int AGENT_TIMEOUT_SECONDS = 120;
 
     private final AnthropicGateway anthropicGateway;
     private final ModelRouter modelRouter;
@@ -25,6 +33,7 @@ public class OrchestratorService {
     private final SecurityAgentService securityAgentService;
     private final TestGenAgentService testGenAgentService;
     private final DeploymentGateService deploymentGateService;
+    private final ContextPruner contextPruner;
     private final ObjectMapper objectMapper;
 
     private static final String PLANNER_PROMPT = """
@@ -57,36 +66,58 @@ public class OrchestratorService {
             """;
 
     public GateResult orchestrate(AgentRequest request) {
-        OrchestrationPlan plan = plan(request);
+        PruneResult pruned = contextPruner.prune(request.getDiff());
+        log.info("[Pruner] {}", pruned.summary());
+
+        AgentRequest prunedRequest = new AgentRequest();
+        prunedRequest.setDiff(pruned.getPrunedDiff());
+        prunedRequest.setPrTitle(request.getPrTitle());
+        prunedRequest.setPrDescription(request.getPrDescription());
+        prunedRequest.setLanguage(request.getLanguage());
+
+        OrchestrationPlan plan = plan(prunedRequest);
         log.info("[Orchestrator] plan: {}", plan.getReasoning());
 
-        Map<String, AgentResult> results = executeAgents(plan.getTasks(), request);
+        Map<String, AgentResult> results = executeAgentsInParallel(plan.getTasks(), prunedRequest);
 
-        AgentResult review   = results.getOrDefault("review",   skipResult("review"));
-        AgentResult security = results.getOrDefault("security", skipResult("security"));
-        AgentResult testGen  = results.getOrDefault("test-gen", skipResult("test-gen"));
-
-        return deploymentGateService.evaluate(review, security, testGen);
+        return deploymentGateService.evaluate(
+                results.getOrDefault("review",   skipResult("review")),
+                results.getOrDefault("security", skipResult("security")),
+                results.getOrDefault("test-gen", skipResult("test-gen"))
+        );
     }
 
     public OrchestrationPlan plan(AgentRequest request) {
-        String response = anthropicGateway.complete(PLANNER_PROMPT, "Git Diff:\n```\n" + request.getDiff() + "\n```");
+        String response = anthropicGateway.complete(
+                PLANNER_PROMPT, "Git Diff:\n```\n" + request.getDiff() + "\n```");
         return parsePlan(response);
     }
 
-    private Map<String, AgentResult> executeAgents(List<AgentTask> tasks, AgentRequest request) {
-        Map<String, AgentResult> results = new java.util.LinkedHashMap<>();
-        for (AgentTask task : tasks) {
-            var gateway = modelRouter.route(task.getModel());
-            log.info("[Orchestrator] running {} via {}", task.getAgent(), gateway.modelName());
-            AgentResult result = switch (task.getAgent()) {
-                case "review"   -> reviewAgentService.review(request, gateway);
-                case "security" -> securityAgentService.scan(request, gateway);
-                case "test-gen" -> testGenAgentService.generate(request, gateway);
-                default -> skipResult(task.getAgent());
-            };
-            results.put(task.getAgent(), result);
-        }
+    private Map<String, AgentResult> executeAgentsInParallel(List<AgentTask> tasks, AgentRequest request) {
+        Map<String, AgentResult> results = new ConcurrentHashMap<>();
+
+        List<CompletableFuture<Void>> futures = tasks.stream()
+                .map(task -> CompletableFuture
+                        .supplyAsync(() -> {
+                            var gateway = modelRouter.route(task.getModel());
+                            log.info("[Orchestrator] running {} via {}", task.getAgent(), gateway.modelName());
+                            return switch (task.getAgent()) {
+                                case "review"   -> reviewAgentService.review(request, gateway);
+                                case "security" -> securityAgentService.scan(request, gateway);
+                                case "test-gen" -> testGenAgentService.generate(request, gateway);
+                                default         -> skipResult(task.getAgent());
+                            };
+                        })
+                        .orTimeout(AGENT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        .exceptionally(ex -> {
+                            log.warn("[Orchestrator] {} timed out or failed: {}", task.getAgent(), ex.getMessage());
+                            return timeoutResult(task.getAgent());
+                        })
+                        .thenAccept(result -> results.put(task.getAgent(), result))
+                )
+                .collect(Collectors.toList());
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         return results;
     }
 
@@ -126,10 +157,14 @@ public class OrchestratorService {
 
     private AgentResult skipResult(String agentType) {
         return AgentResult.builder()
-                .agentType(agentType)
-                .status(AgentResult.Status.PASS)
-                .summary("skipped by orchestrator")
-                .issues(List.of())
-                .build();
+                .agentType(agentType).status(AgentResult.Status.PASS)
+                .summary("skipped by orchestrator").issues(List.of()).build();
+    }
+
+    private AgentResult timeoutResult(String agentType) {
+        return AgentResult.builder()
+                .agentType(agentType).status(AgentResult.Status.WARN)
+                .summary("agent timed out after " + AGENT_TIMEOUT_SECONDS + "s — skipped")
+                .issues(List.of()).build();
     }
 }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.harness.orchestration.gateway.AnthropicGateway;
 import com.harness.orchestration.model.AgentRequest;
 import com.harness.orchestration.model.OrchestrationPlan;
+import com.harness.orchestration.pruner.ContextPruner;
 import com.harness.orchestration.service.DeploymentGateService;
 import com.harness.orchestration.service.ModelRouter;
 import com.harness.orchestration.service.OrchestratorService;
@@ -37,7 +38,7 @@ class OrchestratorServiceTest {
         orchestratorService = new OrchestratorService(
                 anthropicGateway, modelRouter,
                 reviewAgentService, securityAgentService, testGenAgentService,
-                deploymentGateService, new ObjectMapper()
+                deploymentGateService, new ContextPruner(), new ObjectMapper()
         );
     }
 
