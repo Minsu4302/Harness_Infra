@@ -6,9 +6,11 @@ import com.harness.orchestration.gateway.LlmGateway;
 import com.harness.orchestration.model.AgentRequest;
 import com.harness.orchestration.model.AgentResult;
 import com.harness.orchestration.model.AgentResult.Status;
+import com.harness.orchestration.model.ConflictResolution;
 import com.harness.orchestration.model.GateResult;
 import com.harness.orchestration.model.GateResult.Decision;
 import com.harness.orchestration.pruner.ContextPruner;
+import com.harness.orchestration.service.ConflictResolver;
 import com.harness.orchestration.service.DeploymentGateService;
 import com.harness.orchestration.service.ModelRouter;
 import com.harness.orchestration.service.OrchestratorService;
@@ -36,6 +38,7 @@ class OrchestratorParallelTest {
     @Mock private ReviewAgentService reviewAgentService;
     @Mock private SecurityAgentService securityAgentService;
     @Mock private TestGenAgentService testGenAgentService;
+    @Mock private ConflictResolver conflictResolver;
     @Mock private LlmGateway mockGateway;
 
     private OrchestratorService orchestratorService;
@@ -45,8 +48,12 @@ class OrchestratorParallelTest {
         orchestratorService = new OrchestratorService(
                 anthropicGateway, modelRouter,
                 reviewAgentService, securityAgentService, testGenAgentService,
-                new DeploymentGateService(), new ContextPruner(), new ObjectMapper()
+                new DeploymentGateService(conflictResolver), new ContextPruner(), new ObjectMapper()
         );
+    }
+
+    private ConflictResolution noConflict() {
+        return ConflictResolution.builder().wasConflict(false).build();
     }
 
     @Test
@@ -57,6 +64,7 @@ class OrchestratorParallelTest {
         given(anthropicGateway.complete(anyString(), anyString())).willReturn(planJson);
         given(modelRouter.route(anyString())).willReturn(mockGateway);
         given(mockGateway.modelName()).willReturn("claude-sonnet-4-6");
+        given(conflictResolver.resolve(any(), any())).willReturn(noConflict());
         given(reviewAgentService.review(any(), any())).willReturn(
                 AgentResult.builder().agentType("review").status(Status.PASS)
                         .summary("ok").issues(List.of()).build());
@@ -83,6 +91,7 @@ class OrchestratorParallelTest {
         given(anthropicGateway.complete(anyString(), anyString())).willReturn(planJson);
         given(modelRouter.route(anyString())).willReturn(mockGateway);
         given(mockGateway.modelName()).willReturn("claude-sonnet-4-6");
+        given(conflictResolver.resolve(any(), any())).willReturn(noConflict());
 
         given(reviewAgentService.review(any(), any())).willReturn(
                 AgentResult.builder().agentType("review").status(Status.PASS)
@@ -108,6 +117,7 @@ class OrchestratorParallelTest {
         given(anthropicGateway.complete(anyString(), anyString())).willReturn(planJson);
         given(modelRouter.route(anyString())).willReturn(mockGateway);
         given(mockGateway.modelName()).willReturn("claude-sonnet-4-6");
+        given(conflictResolver.resolve(any(), any())).willReturn(noConflict());
         given(reviewAgentService.review(any(), any())).willThrow(new RuntimeException("API error"));
 
         AgentRequest request = new AgentRequest();
