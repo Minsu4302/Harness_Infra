@@ -10,6 +10,10 @@ gemini:
   api-key: ${GEMINI_API_KEY}
   model: gemini-1.5-flash
 
+openai:
+  api-key: ${OPENAI_API_KEY}
+  model: gpt-4o-mini
+
 spring:
   application:
     name: orchestration-service
