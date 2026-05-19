@@ -18,7 +18,8 @@ jobs:
 
       - name: Build request payload
         run: |
-          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+          DIFF=$(git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }})
+          echo "Diff length: ${#DIFF} chars"
           jq -n \
             --arg diff "$DIFF" \
             --arg title "${{ github.event.pull_request.title }}" \
