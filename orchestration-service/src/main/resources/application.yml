@@ -1,0 +1,11 @@
+server:
+  port: 8080
+
+anthropic:
+  api-key: ${ANTHROPIC_API_KEY}
+  model: claude-sonnet-4-6
+  max-tokens: 2048
+
+spring:
+  application:
+    name: orchestration-service
