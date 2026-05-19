@@ -28,11 +28,16 @@ jobs:
 
       - name: Call AI Orchestration gate
         run: |
-          curl -sf --max-time 300 \
+          HTTP_CODE=$(curl -s --max-time 300 \
             -X POST "http://${{ secrets.GCP_INSTANCE_IP }}:8080/api/orchestrate" \
             -H "Content-Type: application/json" \
             -d @/tmp/payload.json \
-            -o /tmp/response.json
+            -o /tmp/response.json \
+            -w "%{http_code}")
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response body:"
+          cat /tmp/response.json
+          [ "$HTTP_CODE" = "200" ] || exit 1
 
       - name: Post gate report as PR comment
         uses: actions/github-script@v7
