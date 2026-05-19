@@ -612,6 +612,305 @@ sh scripts/constraint-check.sh
 
 ---
 
+## AI Orchestration — Layer C
+
+Harness 인프라 위에 올라가는 AI 에이전트 오케스트레이션 레이어.
+Claude가 PR diff를 분석해 어떤 에이전트를 어떤 모델로 실행할지 동적으로 결정하고,
+결과를 GitHub PR Comment로 자동 게시하며, 에이전트 간 충돌 시 Claude가 직접 중재한다.
+
+### 동기
+
+개발자들이 AI를 비효율적으로 사용해 하루 토큰 한도를 소진하면 당일 개발이 중단된다.
+AI Orchestration은 최소한의 에이전트만 실행해 토큰 낭비를 방지하고, Harness가 그 환경을 최적화한다.
+
+> "AI 토큰 효율화 → 회사 지출 절감 + 개발자 능률 향상"
+
+### 파이프라인 흐름
+
+```
+POST /api/orchestrate  ← GitHub Actions (PR 이벤트)
+  ↓
+ContextPruner          lock·바이너리 제거, 8000자 트런케이트 (토큰 절감)
+  ↓
+OrchestratorService    Claude가 에이전트·모델 동적 결정 (Supervisor-Worker)
+  ↓
+executeAgentsInParallel  CompletableFuture 3개 병렬, 타임아웃 120s → WARN SKIP
+  ├── review    → Claude Sonnet 4.6   복잡한 코드 추론
+  ├── security  → Gemini 1.5 Flash    패턴 매칭·빠른 취약점 스캔
+  └── test-gen  → GPT-4o-mini         코드 생성·테스트 스캐폴딩
+  ↓
+ConflictResolver       review↔security 충돌(XOR FAIL) 시 Claude 재위임
+  ↓
+DeploymentGateService  <details><summary> PR Comment 리포트 생성
+  ↓
+GitHub PR Comment      APPROVED / REJECTED
+```
+
+### Layer C 구현 이력
+
+| 레이어 | 내용 | 핵심 결과물 |
+|--------|------|------------|
+| C-1 | Spring Boot AI Orchestration 기반 — 3 에이전트 + 멀티엔드포인트 | `OrchestratorService`, `AgentRequest/Result/GateResult` |
+| C-2 | Orchestrator + 멀티모델 라우팅 (Claude + Gemini) | `AnthropicGateway`, `GeminiGateway`, `ModelRouter`, `OrchestrationPlan` |
+| C-3 | Context Pruning + 병렬 실행·타임아웃 가드 | `ContextPruner`, `PruneResult`, `CompletableFuture.orTimeout(120s)` |
+| C-4 | PR Comment UI (`<details>`) + Conflict Resolution | `ConflictResolver`, `ConflictResolution`, 접기/펼치기 마크다운 |
+| C-5 | GPT-4o-mini 3번째 모델 추가 | `OpenAiGateway`, `ModelRouter` gpt 라우팅 |
+| C-6 | Docker + GCP e2-micro + GitHub Actions CI/CD | `Dockerfile`, `deploy.yml`, `orchestrate.yml` |
+
+### 모델 분담 (Orchestrator가 동적 결정)
+
+| 모델 | 기본 에이전트 | 이유 |
+|------|-------------|------|
+| Claude Sonnet 4.6 | review | 복잡한 코드 추론·아키텍처 판단 |
+| Gemini 1.5 Flash | security | 패턴 매칭·빠른 취약점 스캔 |
+| GPT-4o-mini | test-gen | 코드 생성·테스트 스캐폴딩 (가성비) |
+
+> Orchestrator가 diff 분석 후 에이전트별 최적 모델을 동적으로 선택. docs-only diff면 review만, security-sensitive 변경이면 security 필수 포함.
+
+### Conflict Resolution — Claude 중재
+
+review와 security가 상반된 결론(한쪽만 FAIL)을 낼 때, 규칙이 아닌 Claude가 최종 판단한다.
+
+```
+review=FAIL, security=PASS  →  Claude가 양쪽 요약을 받아 APPROVED / REJECTED 결정
+review=PASS, security=FAIL  →  동일
+review=FAIL, security=FAIL  →  충돌 없음 → 즉시 REJECTED
+review=PASS, security=PASS  →  충돌 없음 → 즉시 APPROVED
+```
+
+### PR Comment 출력 형식
+
+```markdown
+## 🤖 AI Orchestration Gate Report
+
+✅ **APPROVED**
+
+<details>
+<summary>📋 Code Review — ⚠️ WARN</summary>
+
+**Summary:** Minor naming convention issues
+
+**Issues:**
+- Variable name too short
+</details>
+
+<details>
+<summary>🔒 Security Scan — ✅ PASS</summary>
+
+**Summary:** No vulnerabilities detected
+</details>
+
+<details>
+<summary>🧪 Test Generation — ✅ PASS</summary>
+
+**Summary:** Tests generated for new methods
+
+```java
+@Test
+void testProcessPayment() { ... }
+```
+</details>
+```
+
+### AI Orchestration 수치
+
+| 항목 | 수치 |
+|------|------|
+| 에이전트 수 | 3개 (review, security, test-gen) |
+| 지원 모델 | 3개 (Claude Sonnet, Gemini Flash, GPT-4o-mini) |
+| Context Pruning 한계 | 8,000자 트런케이트 |
+| 필터링 확장자 | 18종 (.lock, .png, .jar, .class 등) |
+| 필터링 경로 | node_modules/, .gradle/, build/, dist/ 등 |
+| 병렬 타임아웃 | 120초 (초과 시 WARN SKIP, 파이프라인 계속) |
+| 배포 환경 | GCP e2-micro us-central1 (Always Free) |
+| CI/CD 트리거 | push to main → 자동 배포 / PR 이벤트 → AI 게이트 |
+| 단위 테스트 | 30개+ (ContextPruner, ConflictResolver, DeploymentGate 등) |
+
+---
+
+## GCP + GitHub Actions 설정 가이드
+
+### 사전 요구사항
+
+- GCP 계정 (e2-micro + us-central1 = Always Free)
+- GitHub 리포지토리
+- API 키 3개: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`
+
+### Step 1 — GCP VM 생성
+
+GCP Console → Compute Engine → VM 인스턴스 만들기
+
+```
+이름: harness-orchestrator
+리전: us-central1 (Always Free 조건)
+머신 유형: e2-micro
+OS: Ubuntu 22.04 LTS
+디스크 유형: 표준 영구 디스크 (pd-standard, Free Tier 조건)
+디스크 크기: 10~30GB
+방화벽: HTTP / HTTPS 허용 체크
+```
+
+> **주의:** 예상 가격 ~$7/월로 표시되지만 e2-micro + us-central1 + pd-standard 조합은 Always Free 적용 시 실제 청구 $0.
+
+### Step 2 — 방화벽 규칙 (포트 8080)
+
+VPC 네트워크 → 방화벽 → 방화벽 규칙 만들기
+
+```
+이름: allow-8080
+트래픽 방향: 수신 (Ingress)
+소스 IP 범위: 0.0.0.0/0
+프로토콜/포트: TCP 8080
+```
+
+### Step 3 — VM 초기 설정
+
+GCP Console → VM 상세 → SSH 버튼 클릭 (브라우저 터미널)
+
+```bash
+# Docker 설치
+sudo apt update && sudo apt install -y docker.io
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+
+# API 키 파일 생성
+sudo mkdir -p /opt/harness
+sudo tee /opt/harness/secrets.env << 'EOF'
+ANTHROPIC_API_KEY=your_anthropic_key
+GEMINI_API_KEY=your_gemini_key
+OPENAI_API_KEY=your_openai_key
+EOF
+sudo chmod 600 /opt/harness/secrets.env
+```
+
+### Step 4 — GitHub Actions SSH 키 생성
+
+```bash
+# GCP VM SSH 터미널에서 실행
+ssh-keygen -t ed25519 -C "github-actions" -f ~/.ssh/github_actions -N ""
+cat ~/.ssh/github_actions.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+
+# 아래 출력 전체를 GitHub Secret에 등록
+cat ~/.ssh/github_actions
+```
+
+### Step 5 — GitHub Secrets 등록
+
+GitHub 리포지토리 → Settings → Secrets and variables → Actions → New repository secret
+
+| Secret 이름 | 값 |
+|------------|---|
+| `GCP_INSTANCE_IP` | VM 외부 IP (예: `35.255.235.55`) |
+| `GCP_USERNAME` | VM 사용자명 (`whoami` 결과) |
+| `GCP_SSH_KEY` | 프라이빗 키 전체 (`-----BEGIN OPENSSH PRIVATE KEY-----` 포함) |
+| `ANTHROPIC_API_KEY` | Anthropic API 키 |
+| `GEMINI_API_KEY` | Google Gemini API 키 |
+| `OPENAI_API_KEY` | OpenAI API 키 |
+
+### Step 6 — GitHub Container Registry 이미지 공개
+
+최초 push 후 이미지가 생성되면:
+
+GitHub → Packages → `orchestration-service` → Package settings → **Change visibility → Public**
+
+> 비공개 상태면 GCP VM에서 pull 시 인증 실패. Public으로 변경하면 별도 인증 없이 pull 가능.
+
+### Step 7 — 동작 확인
+
+```bash
+# main 브랜치 push 후 GitHub Actions 탭에서 "Build and Deploy" green 확인
+
+# GCP VM SSH에서 컨테이너 상태 확인
+docker ps
+docker logs orchestration-service
+
+# 직접 호출 테스트
+curl -X POST http://localhost:8080/api/orchestrate \
+  -H "Content-Type: application/json" \
+  -d '{"diff": "+public class Hello {}"}'
+```
+
+---
+
+## 트러블슈팅 — AI Orchestration
+
+### deploy.yml: SSH 접속 실패
+
+```
+증상: appleboy/ssh-action 에러 "ssh: handshake failed"
+원인: GCP_SSH_KEY가 잘못 등록됨
+
+확인:
+- 프라이빗 키를 -----BEGIN OPENSSH PRIVATE KEY----- 부터
+  -----END OPENSSH PRIVATE KEY----- 까지 전체 복사했는지 확인
+- 줄바꿈 포함 전체 내용이 Secret에 들어갔는지 확인
+```
+
+### deploy.yml: docker pull 실패 (unauthorized)
+
+```
+증상: "unauthorized: unauthenticated" 에러
+원인: ghcr.io 패키지가 비공개 상태
+
+해결: GitHub → Packages → orchestration-service
+      → Package settings → Change visibility → Public
+```
+
+### orchestrate.yml: curl: Connection refused
+
+```
+원인 1: VM 중지 또는 포트 8080 방화벽 규칙 미적용
+  확인: GCP Console → VM 상태 "실행 중" 확인
+        방화벽 규칙 allow-8080 존재 확인
+
+원인 2: Docker 컨테이너 미실행
+  확인: VM SSH → docker ps (orchestration-service 없으면 미실행)
+        docker logs orchestration-service (시작 실패 원인 확인)
+```
+
+### orchestrate.yml: curl timeout (300초 초과)
+
+```
+원인: LLM API 응답 지연 또는 API 키 오류
+확인: docker logs orchestration-service | grep -E "ERROR|WARN"
+      /opt/harness/secrets.env 키 값 유효성 확인
+```
+
+### 외부 IP가 변경됨
+
+```
+증상: deploy.yml SSH 접속 실패, orchestrate.yml curl 실패
+원인: GCP e2-micro 외부 IP는 임시(Ephemeral) — VM 재시작 시 변경 가능
+
+해결 1 (무료): GitHub Secret GCP_INSTANCE_IP 업데이트
+해결 2 (소액 과금): GCP Console → VPC 네트워크 → 외부 IP 주소
+                    → 고정(Static) IP 예약
+```
+
+### Spring Boot 시작 실패: API 키 없음
+
+```
+증상: docker logs에서 아래 메시지 확인
+  "Could not resolve placeholder 'ANTHROPIC_API_KEY'"
+
+확인:
+  cat /opt/harness/secrets.env    # 파일 내용 확인
+  docker inspect orchestration-service  # --env-file 옵션 포함 여부 확인
+```
+
+### Orchestrator가 항상 3개 에이전트를 실행한다
+
+```
+증상: docs-only diff인데 review/security/test-gen 모두 실행됨
+원인: Claude의 plan() 응답 파싱 실패 → defaultPlan() 폴백 동작
+
+확인: docker logs orchestration-service | grep "plan parse failed"
+      → 파싱 실패 원인 확인 (Claude 응답 형식 문제)
+```
+
+---
+
 ## 라이선스
 
 이 하네스 인프라는 공개 사용 가능하며 자유롭게 수정·배포할 수 있다.
