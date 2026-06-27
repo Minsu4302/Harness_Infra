@@ -1,52 +1,41 @@
 ---
 task_type: feature
-title: "Layer C-6 — Docker + GCP + GitHub Actions CI/CD"
-complexity: medium
-started_at: "2026-05-19T05:00:00Z"
-status: completed
+title: "PEV 루프 (Plan-Execute-Verify) 구현"
+issue: "#6"
+started_at: "2026-06-27T00:00:00Z"
 done_condition:
-  - "Dockerfile 멀티스테이지 빌드 (JDK21 builder + JRE21 runtime)"
-  - "deploy.yml — push to main → ghcr.io 이미지 push → GCP SSH 배포"
-  - "orchestrate.yml — PR 이벤트 → GCP:8080 호출 → PR Comment 게시"
-  - "constraint-check.sh exit 0"
+  - "[auto] bash scripts/loop-runner.sh --help exit 0"
+  - "[auto] bash scripts/loop-runner.sh 3회 초과 시 exit 1 확인"
+  - "[auto] tests/loop-runner.test.sh 전체 통과"
+  - "[auto] constraint-check.sh exit 0"
 open_questions: []
 ---
 
-## 개요
-
-Spring Boot 서비스를 Docker 컨테이너로 패키징하고 GCP e2-micro에 배포한다.
-GitHub Actions 두 개 워크플로우로 CI/CD를 완성한다.
-
-1. deploy.yml  — main push 시 ghcr.io에 이미지 빌드·푸시 → GCP SSH로 재배포
-2. orchestrate.yml — PR 오픈/업데이트 시 GCP 서비스 호출 → PR Comment에 AI 리포트 게시
-
-GCP 설정은 수동 작업 필요 (아래 지침 참고).
-
 EXEC_PLAN:
-goal: "Docker 컨테이너화 + GCP 배포 + GitHub Actions CI/CD"
+goal: loop-runner.sh 구현으로 PEV 자동 재시도 루프 추가
 steps:
   - id: S1
-    action: "Git Worktree 생성 (feat/deploy)"
-    output: "worktree at ../harness-deploy"
-    constraint: C05
-    done_condition: "git worktree list에 feat/deploy 확인"
+    action: ".harness/loop/ 디렉토리 생성 및 current.yaml, history.md 초기 파일 작성"
+    output: ".harness/loop/current.yaml, .harness/loop/history.md"
+    constraint: 없음
+    done_condition: "ls .harness/loop/current.yaml .harness/loop/history.md 성공"
   - id: S2
-    action: "Dockerfile 작성 (orchestration-service/Dockerfile)"
-    output: "Dockerfile"
+    action: "scripts/loop-runner.sh 작성 — done_condition 검증·재시도·상태 기록 로직"
+    output: "scripts/loop-runner.sh"
     constraint: C01
-    done_condition: "멀티스테이지 빌드 파일 존재"
+    done_condition: "bash scripts/loop-runner.sh --help exit 0"
   - id: S3
-    action: ".github/workflows/deploy.yml 작성"
-    output: "deploy.yml"
+    action: "context-loader.sh 확장 — 루프 실패 컨텍스트 섹션(## 루프 실패 컨텍스트) 주입"
+    output: "scripts/context-loader.sh (수정)"
     constraint: C01
-    done_condition: "push to main → ghcr.io + GCP 배포 워크플로우"
+    done_condition: "grep '루프 실패 컨텍스트' scripts/context-loader.sh 성공"
   - id: S4
-    action: ".github/workflows/orchestrate.yml 작성"
-    output: "orchestrate.yml"
-    constraint: C01
-    done_condition: "PR 이벤트 → AI 게이트 → PR Comment 워크플로우"
+    action: "tests/loop-runner.test.sh 작성 — happy path(3회 이내 수렴) + edge case(4회 초과) 2개"
+    output: "tests/loop-runner.test.sh"
+    constraint: 없음
+    done_condition: "bash tests/loop-runner.test.sh exit 0"
   - id: S5
-    action: "constraint-check.sh PASS 후 main 머지, worktree 정리"
-    output: "main 브랜치 머지 커밋"
-    constraint: C05
-    done_condition: "constraint-check.sh exit 0 && 머지 커밋 확인"
+    action: "constraint-check.sh 실행하여 전체 PASS 확인"
+    output: "exit 0"
+    constraint: C01~C09
+    done_condition: "bash scripts/constraint-check.sh exit 0"

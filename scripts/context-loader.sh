@@ -146,6 +146,14 @@ else
   printf '(session-buffer.sh 없음)\n' >> "$CURRENT_CONTEXT"
 fi
 
+# 루프 실패 컨텍스트 주입 (loop-runner.sh가 생성한 경우에만)
+_loop_fail="${HARNESS_ROOT}/.harness/loop/last-fail-context.md"
+if [ -f "$_loop_fail" ]; then
+  printf '\n' >> "$CURRENT_CONTEXT"
+  cat "$_loop_fail" >> "$CURRENT_CONTEXT"
+  printf '[context-loader] 루프 실패 컨텍스트 주입됨: %s\n' "$_loop_fail" >&2
+fi
+
 # 태스크 유형별 CoT 프롬프트 주입
 printf '\n## 태스크 프롬프트 (%s)\n\n' "$TASK_TYPE" >> "$CURRENT_CONTEXT"
 
