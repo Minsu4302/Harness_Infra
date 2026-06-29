@@ -146,6 +146,14 @@ else
   printf '(session-buffer.sh 없음)\n' >> "$CURRENT_CONTEXT"
 fi
 
+# 반성 인사이트 주입 (reflect-agent.sh가 생성한 경우에만)
+_reflection="${HARNESS_ROOT}/.harness/reports/reflection.md"
+if [ -f "$_reflection" ]; then
+  printf '\n' >> "$CURRENT_CONTEXT"
+  cat "$_reflection" >> "$CURRENT_CONTEXT"
+  printf '[context-loader] 반성 인사이트 주입됨: %s\n' "$_reflection" >&2
+fi
+
 # 루프 실패 컨텍스트 주입 (loop-runner.sh가 생성한 경우에만)
 _loop_fail="${HARNESS_ROOT}/.harness/loop/last-fail-context.md"
 if [ -f "$_loop_fail" ]; then
