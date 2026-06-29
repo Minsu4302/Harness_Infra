@@ -75,6 +75,7 @@ constraint_to_linter() {
     C07) echo "${HARNESS_ROOT}/linters/session-checkpoint.sh" ;;
     C08) echo "${HARNESS_ROOT}/linters/ui-check.sh" ;;
     C09) echo "${HARNESS_ROOT}/linters/security-scan.sh" ;;
+    C10) echo "${HARNESS_ROOT}/linters/loop-convergence.sh" ;;
     *)   echo "" ;;
   esac
 }

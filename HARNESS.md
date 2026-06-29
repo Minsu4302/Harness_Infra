@@ -7,9 +7,9 @@ context_budget:
   warn_lines: 320
 phase_constraints:
   planning: [C02, C03, C06]
-  dev:      [C01, C02, C03, C07, C09]
-  stab:     [C01, C02, C03, C04, C07, C08, C09]
-  prod:     [C01, C02, C03, C04, C05, C07, C08, C09]
+  dev:      [C01, C02, C03, C07, C09, C10]
+  stab:     [C01, C02, C03, C04, C07, C08, C09, C10]
+  prod:     [C01, C02, C03, C04, C05, C07, C08, C09, C10]
 c07:
   time_threshold_hours: 4
   context_budget_consecutive: 3
@@ -45,6 +45,7 @@ c07:
 | C07 | 세션 체크포인트 | session-checkpoint.sh | dev/stab/prod |
 | C08 | UI 검증 | ui-check.sh | stab/prod |
 | C09 | 보안 규칙 | security-scan.sh | dev/stab/prod |
+| C10 | 루프 수렴 | loop-convergence.sh | dev/stab/prod |
 
 ## 피드백 훅 순서
 
